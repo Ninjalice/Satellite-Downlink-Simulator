@@ -1,0 +1,46 @@
+{
+  "satellites": [
+    {
+      "name": "ISS",
+      "propagator": "sgp4_tle",
+      "tle": {
+        "line1": "1 25544U 98067A   26081.52083333  .00006444  00000+0  12000-3 0  9991",
+        "line2": "2 25544  51.6400  30.0000 0007000   0.0000  20.0000 15.50000000    01"
+      },
+      "orbit": {
+        "altitude_km": 408.0,
+        "eccentricity": 0.0007,
+        "inclination_deg": 51.6,
+        "raan_deg": 30.0,
+        "arg_periapsis_deg": 0.0,
+        "mean_anomaly_deg": 0.0
+      },
+      "radio": {
+        "tx_power_dbw": 12.0,
+        "tx_gain_dbi": 10.0,
+        "downlink_freq_hz": 2200000000.0,
+        "bandwidth_hz": 2000000.0,
+        "required_ebn0_db": 4.5
+      }
+    },
+    {
+      "name": "Demo-GEO",
+      "propagator": "kepler",
+      "orbit": {
+        "altitude_km": 35786.0,
+        "eccentricity": 0.0,
+        "inclination_deg": 0.0,
+        "raan_deg": 0.0,
+        "arg_periapsis_deg": 0.0,
+        "mean_anomaly_deg": 0.0
+      },
+      "radio": {
+        "tx_power_dbw": 16.0,
+        "tx_gain_dbi": 14.0,
+        "downlink_freq_hz": 2200000000.0,
+        "bandwidth_hz": 3000000.0,
+        "required_ebn0_db": 4.0
+      }
+    }
+  ]
+}

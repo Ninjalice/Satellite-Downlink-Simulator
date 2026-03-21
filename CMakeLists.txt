@@ -66,6 +66,14 @@ target_include_directories(imgui_lib PUBLIC
 target_link_libraries(imgui_lib PUBLIC glfw glad)
 target_compile_definitions(imgui_lib PRIVATE IMGUI_IMPL_OPENGL_LOADER_GLAD)
 
+# ── nlohmann/json ─────────────────────────────────────────────────
+FetchContent_Declare(nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # ── stb_image (descarga solo el header) ────────────────────────────
 set(STB_DIR ${CMAKE_BINARY_DIR}/_deps/stb)
 file(MAKE_DIRECTORY ${STB_DIR})
@@ -85,9 +93,16 @@ endif()
 find_package(OpenGL REQUIRED)
 
 # ── Ejecutable ─────────────────────────────────────────────────────
-add_executable(simulator main.cpp)
+add_executable(simulator
+    main.cpp
+    src/orbit.cpp
+    src/scenario.cpp
+)
 
-target_include_directories(simulator PRIVATE ${STB_DIR})
+target_include_directories(simulator PRIVATE
+    ${STB_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 target_compile_definitions(simulator PRIVATE _CRT_SECURE_NO_WARNINGS)
 
 target_link_libraries(simulator PRIVATE
@@ -96,4 +111,5 @@ target_link_libraries(simulator PRIVATE
     glm::glm
     glad
     imgui_lib
+    nlohmann_json::nlohmann_json
 )

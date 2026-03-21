@@ -1,0 +1,8 @@
+{
+  "real_utc_default": true,
+  "initial_time_warp": 1.0,
+  "rain_rate_mm_h": 5.0,
+  "use_shannon_model": true,
+  "shannon_efficiency": 0.7,
+  "elevation_mask_deg": 5.0
+}

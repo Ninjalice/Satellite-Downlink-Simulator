@@ -26,14 +26,13 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <fstream>
+#include <chrono>
+#include <ctime>
+#include <array>
 
-// ─── Constantes fisicas ──────────────────────────────────────────────────
-namespace phys {
-    constexpr double G       = 6.67430e-11;
-    constexpr double M_EARTH = 5.972e24;
-    constexpr double R_EARTH = 6.371e6;
-    constexpr double MU      = G * M_EARTH;
-}
+#include "scenario.h"
+#include "orbit.h"
 
 // ─── Estado global ───────────────────────────────────────────────────────
 static int   WIN_W = 1280, WIN_H = 720;
@@ -224,64 +223,17 @@ LineMesh createAxes(float len) {
     return createLineMesh(v, 6);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  MECANICA ORBITAL
-// ═══════════════════════════════════════════════════════════════════════════
-
-struct OrbitalElements {
-    double a, e, i, raan, omega, M0;
-};
-
-class Orbit {
-public:
-    OrbitalElements el;
-    double time = 0.0;
-
-    Orbit(const OrbitalElements& e) : el(e) {}
-
-    double meanMotion() const { return std::sqrt(phys::MU / (el.a*el.a*el.a)); }
-    double period()     const { return 2.0 * M_PI / meanMotion(); }
-
-    double solveKepler(double M) const {
-        double E = M;
-        for (int it = 0; it < 50; ++it) {
-            double dE = (E - el.e*std::sin(E) - M) / (1.0 - el.e*std::cos(E));
-            E -= dE;
-            if (std::abs(dE) < 1e-12) break;
-        }
-        return E;
-    }
-
-    double trueAnomaly(double E) const {
-        return 2.0 * std::atan2(std::sqrt(1.0+el.e)*std::sin(E/2.0),
-                                std::sqrt(1.0-el.e)*std::cos(E/2.0));
-    }
-
-    glm::dvec3 positionAt(double t) const {
-        double n = meanMotion();
-        double M = el.M0 + n*t;
-        M = std::fmod(M, 2.0*M_PI);
-        double E  = solveKepler(M);
-        double nu = trueAnomaly(E);
-        double r  = el.a * (1.0 - el.e*std::cos(E));
-
-        double xo = r*std::cos(nu), yo = r*std::sin(nu);
-        double ci=std::cos(el.i),   si=std::sin(el.i);
-        double co=std::cos(el.raan),so=std::sin(el.raan);
-        double cw=std::cos(el.omega),sw=std::sin(el.omega);
-
-        double x = (co*cw-so*sw*ci)*xo + (-co*sw-so*cw*ci)*yo;
-        double y = (so*cw+co*sw*ci)*xo + (-so*sw+co*cw*ci)*yo;
-        double z = (sw*si)*xo           + (cw*si)*yo;
-        return glm::dvec3(x, z, y);
-    }
-
-    glm::vec3 posScaled(double t, float er) const {
-        return glm::vec3(positionAt(t) * ((double)er / phys::R_EARTH));
-    }
-
-    void update(double dt) { time += dt; }
-};
+static void drawMetricCard(const char* id, const char* title, const std::string& value, const ImVec4& accent) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.11f, 0.15f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.45f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
+    ImGui::BeginChild(id, ImVec2(0, 62), true);
+    ImGui::TextColored(ImVec4(0.78f, 0.86f, 0.94f, 1.0f), "%s", title);
+    ImGui::TextColored(accent, "%s", value.c_str());
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+}
 
 LineMesh createOrbitPath(const Orbit& orb, float er, int seg = 500) {
     std::vector<float> v;
@@ -408,22 +360,6 @@ void framebufferCB(GLFWwindow*, int w, int h) { WIN_W=w; WIN_H=h; glViewport(0,0
 void scrollCB(GLFWwindow*, double, double yoff) { scroll_accum += (float)yoff; }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  PRESETS ORBITALES
-// ═══════════════════════════════════════════════════════════════════════════
-
-struct OrbitPreset { const char* name; float alt_km; float ecc; float inc_deg; float raan_deg; float omega_deg; };
-
-static const OrbitPreset PRESETS[] = {
-    { "ISS (LEO)",          408.0f,    0.0007f, 51.6f,  30.0f,  0.0f },
-    { "GEO",                35786.0f,  0.0f,    0.0f,   0.0f,   0.0f },
-    { "Molniya",            20229.0f,  0.74f,   63.4f,  -70.0f, 270.0f },
-    { "Sun-sync (SSO)",     600.0f,    0.001f,  97.8f,  45.0f,  0.0f },
-    { "GPS (MEO)",          20200.0f,  0.0f,    55.0f,  0.0f,   0.0f },
-    { "Hubble",             547.0f,    0.0003f, 28.5f,  0.0f,   0.0f },
-};
-static const int NUM_PRESETS = sizeof(PRESETS)/sizeof(PRESETS[0]);
-
-// ═══════════════════════════════════════════════════════════════════════════
 //  MAIN
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -435,7 +371,7 @@ int main() {
     glfwWindowHint(GLFW_SAMPLES, 4);
 
     GLFWwindow* window = glfwCreateWindow(WIN_W, WIN_H,
-        "Simulador Orbital", nullptr, nullptr);
+        "Orbital Simulator", nullptr, nullptr);
     if (!window) { glfwTerminate(); return -1; }
     glfwMakeContextCurrent(window);
 
@@ -455,14 +391,44 @@ int main() {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
 
-    // Estilo mas oscuro y compacto
+    // Estilo tecnico moderno
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding   = 6.0f;
-    style.FrameRounding    = 4.0f;
-    style.GrabRounding     = 4.0f;
+    style.WindowRounding = 10.0f;
+    style.ChildRounding = 8.0f;
+    style.FrameRounding = 6.0f;
+    style.GrabRounding = 6.0f;
+    style.PopupRounding = 8.0f;
+    style.ScrollbarRounding = 10.0f;
     style.WindowBorderSize = 1.0f;
-    style.FramePadding     = ImVec2(6, 4);
-    style.ItemSpacing      = ImVec2(8, 4);
+    style.FrameBorderSize = 1.0f;
+    style.FramePadding = ImVec2(8, 6);
+    style.ItemSpacing = ImVec2(9, 7);
+    style.ItemInnerSpacing = ImVec2(6, 5);
+    style.WindowPadding = ImVec2(12, 10);
+
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_WindowBg]         = ImVec4(0.05f, 0.07f, 0.10f, 0.97f);
+    colors[ImGuiCol_ChildBg]          = ImVec4(0.07f, 0.09f, 0.13f, 0.95f);
+    colors[ImGuiCol_PopupBg]          = ImVec4(0.08f, 0.10f, 0.14f, 0.97f);
+    colors[ImGuiCol_Border]           = ImVec4(0.22f, 0.30f, 0.38f, 0.55f);
+    colors[ImGuiCol_FrameBg]          = ImVec4(0.10f, 0.14f, 0.19f, 0.92f);
+    colors[ImGuiCol_FrameBgHovered]   = ImVec4(0.16f, 0.24f, 0.32f, 0.94f);
+    colors[ImGuiCol_FrameBgActive]    = ImVec4(0.19f, 0.30f, 0.39f, 0.98f);
+    colors[ImGuiCol_Button]           = ImVec4(0.15f, 0.32f, 0.43f, 0.85f);
+    colors[ImGuiCol_ButtonHovered]    = ImVec4(0.20f, 0.44f, 0.56f, 0.92f);
+    colors[ImGuiCol_ButtonActive]     = ImVec4(0.23f, 0.52f, 0.64f, 0.98f);
+    colors[ImGuiCol_Header]           = ImVec4(0.15f, 0.30f, 0.41f, 0.80f);
+    colors[ImGuiCol_HeaderHovered]    = ImVec4(0.22f, 0.45f, 0.57f, 0.90f);
+    colors[ImGuiCol_HeaderActive]     = ImVec4(0.24f, 0.52f, 0.64f, 0.95f);
+    colors[ImGuiCol_Tab]              = ImVec4(0.10f, 0.15f, 0.22f, 0.95f);
+    colors[ImGuiCol_TabHovered]       = ImVec4(0.21f, 0.43f, 0.56f, 0.90f);
+    colors[ImGuiCol_TabActive]        = ImVec4(0.18f, 0.36f, 0.48f, 1.0f);
+    colors[ImGuiCol_TitleBg]          = ImVec4(0.08f, 0.12f, 0.18f, 1.0f);
+    colors[ImGuiCol_TitleBgActive]    = ImVec4(0.12f, 0.19f, 0.26f, 1.0f);
+    colors[ImGuiCol_TableHeaderBg]    = ImVec4(0.11f, 0.17f, 0.23f, 0.95f);
+    colors[ImGuiCol_TableRowBgAlt]    = ImVec4(0.09f, 0.12f, 0.18f, 0.42f);
+    colors[ImGuiCol_PlotLines]        = ImVec4(0.32f, 0.77f, 0.90f, 1.0f);
+    colors[ImGuiCol_PlotLinesHovered] = ImVec4(0.65f, 0.90f, 0.98f, 1.0f);
 
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330");
@@ -511,33 +477,40 @@ int main() {
     bool hasRealTexture = (earthTex != 0);
     if (!earthTex) earthTex = loadTextureFromFile("earth_texture.png");
     if (!earthTex) {
-        std::cout << "[INFO] No se encontro earth_texture.jpg/png, usando textura procedimental.\n";
-        std::cout << "       Descarga una textura de: https://visibleearth.nasa.gov/images/73909\n";
-        std::cout << "       y guardala como 'earth_texture.jpg' junto a main.cpp\n\n";
+        std::cout << "[INFO] earth_texture.jpg/png not found, using procedural texture.\n";
+        std::cout << "       Download one from: https://visibleearth.nasa.gov/images/73909\n";
+        std::cout << "       and place it as 'earth_texture.jpg' next to main.cpp\n\n";
         earthTex = createProceduralEarthTexture();
     } else {
         hasRealTexture = true;
     }
 
+    // ── Escenario JSON ─────────────────────────────────────────────────
+    ConfigDiagnostics cfgDiag;
+    std::vector<SatelliteScenario> satellites = loadSatelliteScenarios("config/satellites.json", cfgDiag);
+    int selectedSatIdx = 0;
+    SatelliteScenario satScenario = satellites[selectedSatIdx];
+    std::vector<AntennaScenario> antennas = loadAntennaScenario("config/antennas.json", cfgDiag);
+    SimScenario simScenario = loadSimScenario("config/sim.json", cfgDiag);
+    time_warp = simScenario.initial_time_warp;
+
     // ── Orbita ─────────────────────────────────────────────────────────
-    OrbitalElements elems;
-    elems.a     = phys::R_EARTH + 408000.0;
-    elems.e     = 0.0007;
-    elems.i     = glm::radians(51.6);
-    elems.raan  = glm::radians(30.0);
-    elems.omega = 0.0;
-    elems.M0    = 0.0;
+    OrbitalElements elems = satScenario.elements;
 
     Orbit orbit(elems);
+    if (satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) {
+        orbit.setMeanMotionOverride(satScenario.tle_mean_motion_rad_s);
+        orbit.time = std::max(0.0, (double)std::time(nullptr) - satScenario.tle_epoch_unix);
+    }
     LineMesh orbitPath = createOrbitPath(orbit, EARTH_R);
     LineMesh axes      = createAxes(EARTH_R * 2.0f);
 
     // Parametros editables (para ImGui)
-    float ui_alt_km   = 408.0f;
-    float ui_ecc      = 0.0007f;
-    float ui_inc_deg  = 51.6f;
-    float ui_raan_deg = 30.0f;
-    float ui_omg_deg  = 0.0f;
+    float ui_alt_km   = (float)((satScenario.elements.a - phys::R_EARTH) / 1000.0);
+    float ui_ecc      = (float)satScenario.elements.e;
+    float ui_inc_deg  = (float)glm::degrees(satScenario.elements.i);
+    float ui_raan_deg = (float)glm::degrees(satScenario.elements.raan);
+    float ui_omg_deg  = (float)glm::degrees(satScenario.elements.omega);
 
     // ── Estrellas ──────────────────────────────────────────────────────
     std::vector<float> starVerts;
@@ -572,17 +545,47 @@ int main() {
     glEnableVertexAttribArray(0);
     glBindVertexArray(0);
 
+    std::vector<float> linkVerts(std::max(1, (int)antennas.size()) * 6, 0.0f);
+    GLuint linkVAO, linkVBO;
+    glGenVertexArrays(1, &linkVAO); glGenBuffers(1, &linkVBO);
+    glBindVertexArray(linkVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, linkVBO);
+    glBufferData(GL_ARRAY_BUFFER, linkVerts.size() * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
+
     // ── Variables de estado ────────────────────────────────────────────
     double lastTime = glfwGetTime();
     bool paused = false;
     float earth_rotation = 0.0f;
     bool show_orbit = true, show_axes = true, show_stars = true, show_trail = true;
     bool use_texture = true;
+    bool show_antennas = true, show_links = true;
+    bool use_shannon_model = simScenario.use_shannon_model;
+    bool real_utc_mode = simScenario.real_utc_default;
+    float rain_rate_mm_h = simScenario.rain_rate_mm_h;
+    float shannon_eff = simScenario.shannon_efficiency;
+    float elevation_mask_deg = simScenario.elevation_mask_deg;
+    std::vector<LinkTelemetry> linkState(antennas.size());
+    std::vector<std::string> eventLog;
+    std::vector<ContactSummary> contacts(antennas.size());
+    std::array<float, 240> marginHist{};
+    std::array<float, 240> throughputHist{};
+    std::vector<std::array<float, 240>> marginHistByAntenna(antennas.size());
+    std::vector<std::array<float, 240>> throughputHistByAntenna(antennas.size());
+    int histCount = 0;
+    int histHead = 0;
+    float histTimer = 0.0f;
+    int lastSatIdx = selectedSatIdx;
+    int selectedAntennaIdx = 0;
+    std::string exportStatus;
+    double sim_unix = (double)std::time(nullptr);
 
     std::cout << "======================================================\n";
-    std::cout << "  Simulador Orbital - Tierra + Satelite\n";
-    std::cout << "  Controles en el panel ImGui (izquierda)\n";
-    std::cout << "  Arrastra el raton para rotar | Scroll para zoom\n";
+    std::cout << "  Orbital Simulator - Earth + Satellite\n";
+    std::cout << "  Controls available in the ImGui panel (left)\n";
+    std::cout << "  Drag mouse to rotate | Scroll to zoom\n";
     std::cout << "======================================================\n\n";
 
     // ── Loop principal ────────────────────────────────────────────────
@@ -641,6 +644,43 @@ int main() {
         orbit.update(sim_dt);
         earth_rotation += sim_dt * (float)(2.0 * M_PI / 86400.0); // 1 rotacion = 24h
         glm::vec3 satPos = orbit.posScaled(orbit.time, EARTH_R);
+        if (real_utc_mode && !paused && std::abs(time_warp - 1.0f) < 0.001f) {
+            sim_unix = (double)std::time(nullptr);
+        } else {
+            sim_unix += sim_dt;
+        }
+
+        if (selectedSatIdx < 0 || selectedSatIdx >= (int)satellites.size()) selectedSatIdx = 0;
+        if (selectedAntennaIdx < 0 || selectedAntennaIdx >= (int)antennas.size()) selectedAntennaIdx = 0;
+        if (selectedSatIdx != lastSatIdx) {
+            satScenario = satellites[selectedSatIdx];
+            orbit.el = satScenario.elements;
+            orbit.setMeanMotionOverride((satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) ? satScenario.tle_mean_motion_rad_s : 0.0);
+            orbit.time = 0.0;
+            if (satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) {
+                orbit.time = std::max(0.0, (double)std::time(nullptr) - satScenario.tle_epoch_unix);
+            }
+            ui_alt_km   = (float)((satScenario.elements.a - phys::R_EARTH) / 1000.0);
+            ui_ecc      = (float)satScenario.elements.e;
+            ui_inc_deg  = (float)glm::degrees(satScenario.elements.i);
+            ui_raan_deg = (float)glm::degrees(satScenario.elements.raan);
+            ui_omg_deg  = (float)glm::degrees(satScenario.elements.omega);
+            contacts.assign(antennas.size(), ContactSummary{});
+            eventLog.clear();
+            marginHist.fill(0.0f);
+            throughputHist.fill(0.0f);
+            for (size_t i = 0; i < marginHistByAntenna.size(); ++i) {
+                marginHistByAntenna[i].fill(0.0f);
+                throughputHistByAntenna[i].fill(0.0f);
+            }
+            histHead = 0;
+            histCount = 0;
+            selectedAntennaIdx = 0;
+            trailCount = 0;
+            deleteLineMesh(orbitPath);
+            orbitPath = createOrbitPath(orbit, EARTH_R);
+            lastSatIdx = selectedSatIdx;
+        }
 
         // Trail
         trailTimer += sim_dt;
@@ -660,88 +700,498 @@ int main() {
         double vel_kms = std::sqrt(phys::MU * (2.0/posLen - 1.0/orbit.el.a)) / 1000.0;
         double period_min = orbit.period() / 60.0;
 
+        int activeLinks = 0;
+        int lineCount = 0;
+        float bestMargin = -30.0f;
+        float totalThroughput = 0.0f;
+        const double worldToMeters = phys::R_EARTH / EARTH_R;
+        for (size_t i = 0; i < antennas.size(); ++i) {
+            AntennaScenario& ant = antennas[i];
+            LinkTelemetry& lt = linkState[i];
+
+            glm::vec3 local = localFromLatLon(ant.latitude_deg, ant.longitude_deg, EARTH_R);
+            glm::vec3 stationPos = rotateY(local, earth_rotation);
+            glm::vec3 upLocal = glm::normalize(local);
+            glm::vec3 eastLocal = glm::normalize(glm::vec3(-std::sin(glm::radians(ant.longitude_deg)), 0.0f, std::cos(glm::radians(ant.longitude_deg))));
+            glm::vec3 northLocal = glm::normalize(glm::cross(upLocal, eastLocal));
+
+            glm::vec3 up = glm::normalize(rotateY(upLocal, earth_rotation));
+            glm::vec3 east = glm::normalize(rotateY(eastLocal, earth_rotation));
+            glm::vec3 north = glm::normalize(rotateY(northLocal, earth_rotation));
+
+            glm::vec3 rangeVec = satPos - stationPos;
+            float rangeWorld = glm::length(rangeVec);
+            glm::vec3 ur = (rangeWorld > 0.0f) ? rangeVec / rangeWorld : glm::vec3(0, 1, 0);
+            float elevationDeg = glm::degrees(std::asin(glm::clamp(glm::dot(ur, up), -1.0f, 1.0f)));
+            float azDeg = glm::degrees(std::atan2(glm::dot(ur, east), glm::dot(ur, north)));
+            if (azDeg < 0.0f) azDeg += 360.0f;
+
+            float maxAzStep = ant.slew_az_deg_s * dt;
+            float maxElStep = ant.slew_el_deg_s * dt;
+            float daz = wrap180(azDeg - ant.current_az_deg);
+            float del = elevationDeg - ant.current_el_deg;
+            ant.current_az_deg = wrap360(ant.current_az_deg + glm::clamp(daz, -maxAzStep, maxAzStep));
+            ant.current_el_deg += glm::clamp(del, -maxElStep, maxElStep);
+            ant.current_el_deg = glm::clamp(ant.current_el_deg, -5.0f, 90.0f);
+
+            bool visible = elevationDeg >= std::max(elevation_mask_deg, ant.min_elevation_deg);
+            bool locked = visible
+                       && (std::abs(wrap180(azDeg - ant.current_az_deg)) < 0.7f)
+                       && (std::abs(elevationDeg - ant.current_el_deg) < 0.7f);
+
+            float rangeKm = (float)((rangeWorld * worldToMeters) / 1000.0);
+            float freqGHz = (float)(satScenario.downlink_freq_hz / 1e9);
+            float fspl = 92.45f + 20.0f * std::log10(std::max(1.0f, rangeKm)) + 20.0f * std::log10(std::max(0.1f, freqGHz));
+            float rain = visible ? rainFadeDb(rain_rate_mm_h, elevationDeg) : 0.0f;
+            float atmLoss = visible ? (2.0f / std::max(0.25f, std::sin(glm::radians(std::max(1.0f, elevationDeg))))) : 0.0f;
+
+            float rxPowerDbw = (float)(satScenario.tx_power_dbw + satScenario.tx_gain_dbi)
+                             + ant.rx_gain_dbi - fspl - rain - atmLoss - ant.misc_losses_db;
+            float tSys = std::max(30.0f, ant.system_temp_k);
+            float n0DbwHz = -228.6f + 10.0f * std::log10(tSys);
+            float cn0 = rxPowerDbw - n0DbwHz;
+            float snrDb = cn0 - 10.0f * std::log10((float)std::max(1.0, satScenario.bandwidth_hz));
+            float assumedBitrate = (float)std::max(1.0, satScenario.bandwidth_hz * 0.8);
+            float ebn0 = cn0 - 10.0f * std::log10(assumedBitrate);
+            float margin = ebn0 - (float)satScenario.required_ebn0_db;
+            float ebn0Lin = std::pow(10.0f, ebn0 / 10.0f);
+            float ber = 0.5f * std::erfc(std::sqrt(std::max(0.0f, ebn0Lin)));
+
+            float throughputMbps = 0.0f;
+            if (visible && locked) {
+                if (use_shannon_model) {
+                    float snrLin = std::pow(10.0f, snrDb / 10.0f);
+                    double th = satScenario.bandwidth_hz * std::log2(1.0 + std::max(0.0, (double)snrLin)) * shannon_eff;
+                    throughputMbps = (float)(th / 1e6);
+                } else {
+                    throughputMbps = throughputTableMbps(ebn0);
+                }
+            }
+
+            lt.visible = visible;
+            lt.locked = locked;
+            lt.range_km = rangeKm;
+            lt.elevation_deg = elevationDeg;
+            lt.azimuth_deg = azDeg;
+            lt.rain_loss_db = rain;
+            lt.fspl_db = fspl;
+            lt.cn0_dbhz = cn0;
+            lt.ebn0_db = ebn0;
+            lt.margin_db = margin;
+            lt.ber = visible ? ber : 1.0f;
+            lt.throughput_mbps = throughputMbps;
+
+            bool linkActive = visible && locked;
+            if (linkActive) {
+                activeLinks++;
+                bestMargin = std::max(bestMargin, margin);
+                totalThroughput += throughputMbps;
+                if (lineCount * 6 + 5 < (int)linkVerts.size()) {
+                    linkVerts[lineCount * 6 + 0] = stationPos.x;
+                    linkVerts[lineCount * 6 + 1] = stationPos.y;
+                    linkVerts[lineCount * 6 + 2] = stationPos.z;
+                    linkVerts[lineCount * 6 + 3] = satPos.x;
+                    linkVerts[lineCount * 6 + 4] = satPos.y;
+                    linkVerts[lineCount * 6 + 5] = satPos.z;
+                    lineCount++;
+                }
+            }
+
+            if (visible != ant.was_visible) {
+                std::ostringstream e;
+                e << "[" << utcStringFromUnix(sim_unix) << "] " << ant.name << " " << (visible ? "AOS" : "LOS");
+                eventLog.push_back(e.str());
+            }
+            if (locked != ant.was_locked) {
+                std::ostringstream e;
+                e << "[" << utcStringFromUnix(sim_unix) << "] " << ant.name << " " << (locked ? "LOCK" : "UNLOCK");
+                eventLog.push_back(e.str());
+            }
+
+            ContactSummary& cs = contacts[i];
+            if (linkActive && !cs.in_contact) {
+                cs.in_contact = true;
+                cs.contact_start_sim = orbit.time;
+                cs.pass_count++;
+            } else if (!linkActive && cs.in_contact) {
+                cs.in_contact = false;
+                cs.last_contact_s = (float)(orbit.time - cs.contact_start_sim);
+                cs.total_contact_s += cs.last_contact_s;
+            }
+            ant.was_visible = visible;
+            ant.was_locked = locked;
+        }
+
+        histTimer += sim_dt;
+        if (histTimer >= 1.0f) {
+            histTimer = 0.0f;
+            marginHist[histHead] = bestMargin;
+            throughputHist[histHead] = totalThroughput;
+            for (size_t i = 0; i < antennas.size(); ++i) {
+                marginHistByAntenna[i][histHead] = linkState[i].margin_db;
+                throughputHistByAntenna[i][histHead] = linkState[i].throughput_mbps;
+            }
+            histHead = (histHead + 1) % (int)marginHist.size();
+            histCount = std::min((int)marginHist.size(), histCount + 1);
+        }
+        if (eventLog.size() > 120) {
+            eventLog.erase(eventLog.begin(), eventLog.begin() + (eventLog.size() - 120));
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, linkVBO);
+        if (lineCount > 0) {
+            glBufferSubData(GL_ARRAY_BUFFER, 0, lineCount * 6 * sizeof(float), linkVerts.data());
+        }
+
         // ═══════════════════════════════════════════════════════════
         //  PANEL IMGUI
         // ═══════════════════════════════════════════════════════════
 
-        ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Control de Simulacion");
+        const float uiGap = 10.0f;
+        const float leftW = 560.0f;
+        const float topH = 84.0f;
+        const float leftX = uiGap;
+        const float rightX = leftX + leftW + uiGap;
+        const float rightW = std::max(320.0f, (float)WIN_W - rightX - uiGap);
+        const float lowerY = uiGap + topH + uiGap;
 
-        // Seccion: Tiempo
-        ImGui::SeparatorText("Tiempo");
-        ImGui::SliderFloat("Warp", &time_warp, 1.0f, 10000.0f, "x%.0f", ImGuiSliderFlags_Logarithmic);
-        if (ImGui::Button(paused ? "  Reanudar  " : "  Pausar  ")) paused = !paused;
-        ImGui::SameLine();
-        if (ImGui::Button("Reiniciar")) {
-            orbit.time = 0.0;
-            trailCount = 0;
-            earth_rotation = 0.0f;
+        std::ostringstream kSat, kLinks, kThr, kMargin;
+        kSat << satScenario.name;
+        kLinks << activeLinks << " / " << antennas.size();
+        kThr << std::fixed << std::setprecision(2) << totalThroughput << " Mbps";
+        kMargin << std::fixed << std::setprecision(1) << bestMargin << " dB";
+
+        ImGui::SetNextWindowPos(ImVec2(leftX, uiGap), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2((float)WIN_W - 2.0f * uiGap, topH), ImGuiCond_Always);
+        ImGui::Begin("Mission Overview", nullptr,
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
+        if (ImGui::BeginTable("overview_cards", 4, ImGuiTableFlags_SizingStretchSame)) {
+            ImGui::TableNextColumn(); drawMetricCard("card_sat", "SATELLITE", kSat.str(), ImVec4(0.75f, 0.88f, 0.98f, 1.0f));
+            ImGui::TableNextColumn(); drawMetricCard("card_links", "ACTIVE LINKS", kLinks.str(), ImVec4(0.38f, 0.88f, 0.62f, 1.0f));
+            ImGui::TableNextColumn(); drawMetricCard("card_thr", "TOTAL THROUGHPUT", kThr.str(), ImVec4(0.44f, 0.82f, 0.95f, 1.0f));
+            ImGui::TableNextColumn(); drawMetricCard("card_margin", "BEST MARGIN", kMargin.str(), ImVec4(0.95f, 0.80f, 0.42f, 1.0f));
+            ImGui::EndTable();
         }
-        double elapsed = orbit.time;
-        int hrs = (int)(elapsed / 3600.0);
-        int mins = (int)(std::fmod(elapsed, 3600.0) / 60.0);
-        int secs = (int)(std::fmod(elapsed, 60.0));
-        ImGui::Text("Tiempo: %02d:%02d:%02d", hrs, mins, secs);
+        ImGui::End();
 
-        // Seccion: Informacion orbital
-        ImGui::SeparatorText("Info Orbital");
-        ImGui::Text("Altitud:  %.1f km", alt_km);
-        ImGui::Text("Velocidad: %.3f km/s", vel_kms);
-        ImGui::Text("Periodo:  %.1f min", period_min);
+        ImGui::SetNextWindowPos(ImVec2(leftX, lowerY), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(leftW, (float)WIN_H - lowerY - uiGap), ImGuiCond_Always);
+        ImGui::Begin("Mission Control");
 
-        // Seccion: Parametros orbitales
-        ImGui::SeparatorText("Parametros Orbitales");
-        ImGui::SliderFloat("Altitud (km)", &ui_alt_km, 200.0f, 42000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("Excentricidad", &ui_ecc, 0.0f, 0.95f, "%.4f");
-        ImGui::SliderFloat("Inclinacion", &ui_inc_deg, 0.0f, 180.0f, "%.1f deg");
-        ImGui::SliderFloat("RAAN", &ui_raan_deg, -180.0f, 360.0f, "%.1f deg");
-        ImGui::SliderFloat("Arg Periapsis", &ui_omg_deg, 0.0f, 360.0f, "%.1f deg");
-
-        if (ImGui::Button("Aplicar Cambios")) {
-            orbit.el.a     = phys::R_EARTH + (double)ui_alt_km * 1000.0;
-            orbit.el.e     = ui_ecc;
-            orbit.el.i     = glm::radians((double)ui_inc_deg);
-            orbit.el.raan  = glm::radians((double)ui_raan_deg);
-            orbit.el.omega = glm::radians((double)ui_omg_deg);
-            orbit.time = 0.0;
-            trailCount = 0;
-            deleteLineMesh(orbitPath);
-            orbitPath = createOrbitPath(orbit, EARTH_R);
-        }
-
-        // Presets
-        ImGui::SeparatorText("Presets");
-        for (int i = 0; i < NUM_PRESETS; ++i) {
-            if (i > 0 && i % 3 != 0) ImGui::SameLine();
-            if (ImGui::Button(PRESETS[i].name)) {
-                ui_alt_km   = PRESETS[i].alt_km;
-                ui_ecc      = PRESETS[i].ecc;
-                ui_inc_deg  = PRESETS[i].inc_deg;
-                ui_raan_deg = PRESETS[i].raan_deg;
-                ui_omg_deg  = PRESETS[i].omega_deg;
-
-                orbit.el.a     = phys::R_EARTH + (double)ui_alt_km * 1000.0;
-                orbit.el.e     = ui_ecc;
-                orbit.el.i     = glm::radians((double)ui_inc_deg);
-                orbit.el.raan  = glm::radians((double)ui_raan_deg);
-                orbit.el.omega = glm::radians((double)ui_omg_deg);
-                orbit.time = 0.0;
-                trailCount = 0;
-                deleteLineMesh(orbitPath);
-                orbitPath = createOrbitPath(orbit, EARTH_R);
+        auto drawLinkStatus = [](const LinkTelemetry& lt) {
+            if (!lt.visible) {
+                ImGui::TextColored(ImVec4(0.90f, 0.27f, 0.27f, 1.0f), "RED");
+            } else if (lt.locked && lt.margin_db >= 3.0f) {
+                ImGui::TextColored(ImVec4(0.25f, 0.88f, 0.48f, 1.0f), "GREEN");
+            } else {
+                ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.28f, 1.0f), "YELLOW");
             }
-        }
+        };
 
-        // Seccion: Visualizacion
-        ImGui::SeparatorText("Visualizacion");
-        ImGui::Checkbox("Orbita", &show_orbit);
-        ImGui::SameLine(); ImGui::Checkbox("Ejes", &show_axes);
-        ImGui::Checkbox("Estrellas", &show_stars);
-        ImGui::SameLine(); ImGui::Checkbox("Trail", &show_trail);
-        ImGui::Checkbox("Textura Tierra", &use_texture);
+        if (ImGui::BeginTabBar("mission_tabs")) {
+            if (ImGui::BeginTabItem("Ops")) {
+                ImGui::SeparatorText("Time");
+                ImGui::SliderFloat("Warp", &time_warp, 1.0f, 10000.0f, "x%.0f", ImGuiSliderFlags_Logarithmic);
+                if (ImGui::Button(paused ? "Resume" : "Pause")) paused = !paused;
+                ImGui::SameLine();
+                if (ImGui::Button("Reset")) {
+                    orbit.time = 0.0;
+                    trailCount = 0;
+                    earth_rotation = 0.0f;
+                }
+
+                double elapsed = orbit.time;
+                int hrs = (int)(elapsed / 3600.0);
+                int mins = (int)(std::fmod(elapsed, 3600.0) / 60.0);
+                int secs = (int)(std::fmod(elapsed, 60.0));
+                ImGui::Text("Sim Time: %02d:%02d:%02d", hrs, mins, secs);
+                ImGui::Text("UTC: %s", utcStringFromUnix(sim_unix).c_str());
+
+                ImGui::SeparatorText("Satellite Selection");
+                if (ImGui::BeginCombo("Active Satellite", satScenario.name.c_str())) {
+                    for (int i = 0; i < (int)satellites.size(); ++i) {
+                        bool selected = (i == selectedSatIdx);
+                        if (ImGui::Selectable(satellites[i].name.c_str(), selected)) selectedSatIdx = i;
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+
+                ImGui::SeparatorText("Orbital Info");
+                ImGui::Text("Altitude: %.1f km", alt_km);
+                ImGui::Text("Velocity: %.3f km/s", vel_kms);
+                ImGui::Text("Period: %.1f min", period_min);
+                ImGui::Text("Satellite: %s", satScenario.name.c_str());
+                ImGui::Text("Satellites: %d | Antennas: %d | Active links: %d", (int)satellites.size(), (int)antennas.size(), activeLinks);
+
+                ImGui::SeparatorText("Orbital Params");
+                ImGui::SliderFloat("Altitude (km)", &ui_alt_km, 200.0f, 42000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("Eccentricity", &ui_ecc, 0.0f, 0.95f, "%.4f");
+                ImGui::SliderFloat("Inclination", &ui_inc_deg, 0.0f, 180.0f, "%.1f deg");
+                ImGui::SliderFloat("RAAN", &ui_raan_deg, -180.0f, 360.0f, "%.1f deg");
+                ImGui::SliderFloat("Arg Periapsis", &ui_omg_deg, 0.0f, 360.0f, "%.1f deg");
+
+                if (ImGui::Button("Apply Changes")) {
+                    orbit.el.a     = phys::R_EARTH + (double)ui_alt_km * 1000.0;
+                    orbit.el.e     = ui_ecc;
+                    orbit.el.i     = glm::radians((double)ui_inc_deg);
+                    orbit.el.raan  = glm::radians((double)ui_raan_deg);
+                    orbit.el.omega = glm::radians((double)ui_omg_deg);
+                    satScenario.propagator = "kepler";
+                    orbit.setMeanMotionOverride(0.0);
+                    satScenario.elements = orbit.el;
+                    satellites[selectedSatIdx] = satScenario;
+                    orbit.time = 0.0;
+                    trailCount = 0;
+                    deleteLineMesh(orbitPath);
+                    orbitPath = createOrbitPath(orbit, EARTH_R);
+                }
+
+                ImGui::SeparatorText("Presets");
+                for (int i = 0; i < NUM_PRESETS; ++i) {
+                    if (i > 0 && i % 3 != 0) ImGui::SameLine();
+                    if (ImGui::Button(PRESETS[i].name)) {
+                        ui_alt_km   = PRESETS[i].alt_km;
+                        ui_ecc      = PRESETS[i].ecc;
+                        ui_inc_deg  = PRESETS[i].inc_deg;
+                        ui_raan_deg = PRESETS[i].raan_deg;
+                        ui_omg_deg  = PRESETS[i].omega_deg;
+
+                        orbit.el.a     = phys::R_EARTH + (double)ui_alt_km * 1000.0;
+                        orbit.el.e     = ui_ecc;
+                        orbit.el.i     = glm::radians((double)ui_inc_deg);
+                        orbit.el.raan  = glm::radians((double)ui_raan_deg);
+                        orbit.el.omega = glm::radians((double)ui_omg_deg);
+                        satScenario.propagator = "kepler";
+                        orbit.setMeanMotionOverride(0.0);
+                        satScenario.elements = orbit.el;
+                        satellites[selectedSatIdx] = satScenario;
+                        orbit.time = 0.0;
+                        trailCount = 0;
+                        deleteLineMesh(orbitPath);
+                        orbitPath = createOrbitPath(orbit, EARTH_R);
+                    }
+                }
+
+                if (ImGui::Button("Reload JSON")) {
+                    cfgDiag = {};
+                    satellites = loadSatelliteScenarios("config/satellites.json", cfgDiag);
+                    selectedSatIdx = 0;
+                    selectedAntennaIdx = 0;
+                    satScenario = satellites[selectedSatIdx];
+                    antennas = loadAntennaScenario("config/antennas.json", cfgDiag);
+                    simScenario = loadSimScenario("config/sim.json", cfgDiag);
+                    use_shannon_model = simScenario.use_shannon_model;
+                    rain_rate_mm_h = simScenario.rain_rate_mm_h;
+                    shannon_eff = simScenario.shannon_efficiency;
+                    elevation_mask_deg = simScenario.elevation_mask_deg;
+
+                    linkState.assign(antennas.size(), LinkTelemetry{});
+                    contacts.assign(antennas.size(), ContactSummary{});
+                    marginHistByAntenna.assign(antennas.size(), std::array<float, 240>{});
+                    throughputHistByAntenna.assign(antennas.size(), std::array<float, 240>{});
+                    linkVerts.assign(std::max(1, (int)antennas.size()) * 6, 0.0f);
+                    glBindBuffer(GL_ARRAY_BUFFER, linkVBO);
+                    glBufferData(GL_ARRAY_BUFFER, linkVerts.size() * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+
+                    orbit.el = satScenario.elements;
+                    orbit.setMeanMotionOverride((satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) ? satScenario.tle_mean_motion_rad_s : 0.0);
+                    ui_alt_km   = (float)((satScenario.elements.a - phys::R_EARTH) / 1000.0);
+                    ui_ecc      = (float)satScenario.elements.e;
+                    ui_inc_deg  = (float)glm::degrees(satScenario.elements.i);
+                    ui_raan_deg = (float)glm::degrees(satScenario.elements.raan);
+                    ui_omg_deg  = (float)glm::degrees(satScenario.elements.omega);
+                    orbit.time = 0.0;
+                    if (satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) {
+                        orbit.time = std::max(0.0, (double)std::time(nullptr) - satScenario.tle_epoch_unix);
+                    }
+                    lastSatIdx = selectedSatIdx;
+                    trailCount = 0;
+                    deleteLineMesh(orbitPath);
+                    orbitPath = createOrbitPath(orbit, EARTH_R);
+                }
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Links")) {
+                ImGui::SeparatorText("Communication Model");
+                ImGui::Checkbox("Real UTC default", &real_utc_mode);
+                ImGui::SliderFloat("Rain rate (mm/h)", &rain_rate_mm_h, 0.0f, 40.0f, "%.1f");
+                ImGui::SliderFloat("Elevation mask", &elevation_mask_deg, 0.0f, 30.0f, "%.1f deg");
+                ImGui::Checkbox("Shannon throughput", &use_shannon_model);
+                if (use_shannon_model) ImGui::SliderFloat("Shannon efficiency", &shannon_eff, 0.1f, 1.0f, "%.2f");
+
+                if (ImGui::BeginTable("links", 7, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 260))) {
+                    ImGui::TableSetupColumn("Status");
+                    ImGui::TableSetupColumn("Antenna");
+                    ImGui::TableSetupColumn("Link");
+                    ImGui::TableSetupColumn("El (deg)");
+                    ImGui::TableSetupColumn("Range (km)");
+                    ImGui::TableSetupColumn("Margin (dB)");
+                    ImGui::TableSetupColumn("Thr (Mbps)");
+                    ImGui::TableHeadersRow();
+                    for (size_t i = 0; i < antennas.size(); ++i) {
+                        const LinkTelemetry& lt = linkState[i];
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0); drawLinkStatus(lt);
+                        ImGui::TableSetColumnIndex(1);
+                        if (ImGui::Selectable((antennas[i].name + "##sel").c_str(), selectedAntennaIdx == (int)i, ImGuiSelectableFlags_SpanAllColumns)) {
+                            selectedAntennaIdx = (int)i;
+                        }
+                        ImGui::TableSetColumnIndex(2); ImGui::TextUnformatted(lt.visible ? (lt.locked ? "LOCK" : "VISIBLE") : "NO LINK");
+                        ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f", lt.elevation_deg);
+                        ImGui::TableSetColumnIndex(4); ImGui::Text("%.0f", lt.range_km);
+                        ImGui::TableSetColumnIndex(5); ImGui::Text("%.1f", lt.margin_db);
+                        ImGui::TableSetColumnIndex(6); ImGui::Text("%.2f", lt.throughput_mbps);
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Contacts")) {
+                if (ImGui::BeginTable("contacts", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders, ImVec2(0, 220))) {
+                    ImGui::TableSetupColumn("Antenna");
+                    ImGui::TableSetupColumn("Passes");
+                    ImGui::TableSetupColumn("Current (s)");
+                    ImGui::TableSetupColumn("Last (s)");
+                    ImGui::TableHeadersRow();
+                    for (size_t i = 0; i < antennas.size(); ++i) {
+                        float currentS = contacts[i].in_contact ? (float)(orbit.time - contacts[i].contact_start_sim) : 0.0f;
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(antennas[i].name.c_str());
+                        ImGui::TableSetColumnIndex(1); ImGui::Text("%d", contacts[i].pass_count);
+                        ImGui::TableSetColumnIndex(2); ImGui::Text("%.1f", currentS);
+                        ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f", contacts[i].last_contact_s);
+                    }
+                    ImGui::EndTable();
+                }
+
+                if (ImGui::Button("Export contacts CSV")) {
+                    std::ofstream out("contact_report.csv");
+                    if (!out.good()) {
+                        exportStatus = "Could not write contact_report.csv";
+                    } else {
+                        out << "antenna,satellite,passes,total_contact_s,last_contact_s,in_contact,current_contact_s\n";
+                        for (size_t i = 0; i < antennas.size(); ++i) {
+                            float currentS = contacts[i].in_contact ? (float)(orbit.time - contacts[i].contact_start_sim) : 0.0f;
+                            out << antennas[i].name << ","
+                                << satScenario.name << ","
+                                << contacts[i].pass_count << ","
+                                << contacts[i].total_contact_s << ","
+                                << contacts[i].last_contact_s << ","
+                                << (contacts[i].in_contact ? 1 : 0) << ","
+                                << currentS << "\n";
+                        }
+                        exportStatus = "Exported: contact_report.csv";
+                    }
+                }
+                if (!exportStatus.empty()) ImGui::TextUnformatted(exportStatus.c_str());
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("History")) {
+                static std::array<float, 240> marginView{};
+                static std::array<float, 240> throughputView{};
+                if (histCount > 0) {
+                    for (int i = 0; i < histCount; ++i) {
+                        int idx = (histHead - histCount + i + (int)marginHist.size()) % (int)marginHist.size();
+                        marginView[i] = marginHist[idx];
+                        throughputView[i] = throughputHist[idx];
+                    }
+                    ImGui::PlotLines("Margin History (dB)", marginView.data(), histCount, 0, nullptr, -20.0f, 30.0f, ImVec2(0, 70));
+                    ImGui::PlotLines("Throughput History (Mbps)", throughputView.data(), histCount, 0, nullptr, 0.0f, 20.0f, ImVec2(0, 70));
+
+                    for (size_t a = 0; a < antennas.size(); ++a) {
+                        if (ImGui::TreeNode(("Antenna Plot: " + antennas[a].name).c_str())) {
+                            static std::array<float, 240> antMarginView{};
+                            static std::array<float, 240> antThrView{};
+                            for (int i = 0; i < histCount; ++i) {
+                                int idx = (histHead - histCount + i + (int)marginHist.size()) % (int)marginHist.size();
+                                antMarginView[i] = marginHistByAntenna[a][idx];
+                                antThrView[i] = throughputHistByAntenna[a][idx];
+                            }
+                            ImGui::PlotLines("Margin", antMarginView.data(), histCount, 0, nullptr, -20.0f, 30.0f, ImVec2(0, 50));
+                            ImGui::PlotLines("Throughput", antThrView.data(), histCount, 0, nullptr, 0.0f, 20.0f, ImVec2(0, 50));
+                            ImGui::TreePop();
+                        }
+                    }
+                }
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Visual")) {
+                ImGui::Checkbox("Orbit", &show_orbit);
+                ImGui::SameLine(); ImGui::Checkbox("Axes", &show_axes);
+                ImGui::Checkbox("Stars", &show_stars);
+                ImGui::SameLine(); ImGui::Checkbox("Trail", &show_trail);
+                ImGui::Checkbox("Earth texture", &use_texture);
+                ImGui::Checkbox("Antennas", &show_antennas);
+                ImGui::SameLine(); ImGui::Checkbox("Links", &show_links);
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Diagnostics")) {
+                ImGui::Text("Warnings: %d | Errors: %d", (int)cfgDiag.warnings.size(), (int)cfgDiag.errors.size());
+                ImGui::Separator();
+                if (ImGui::BeginChild("diag_tab_scroll", ImVec2(0, 0), true)) {
+                    for (const std::string& w : cfgDiag.warnings) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "WARN: %s", w.c_str());
+                    }
+                    for (const std::string& e : cfgDiag.errors) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "ERR : %s", e.c_str());
+                    }
+                    ImGui::EndChild();
+                }
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Events")) {
+                if (ImGui::BeginChild("events_tab_scroll", ImVec2(0, 0), true)) {
+                    for (const std::string& e : eventLog) {
+                        ImGui::TextUnformatted(e.c_str());
+                    }
+                    if (!eventLog.empty()) {
+                        ImGui::SetScrollHereY(1.0f);
+                    }
+                    ImGui::EndChild();
+                }
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
+        }
 
         ImGui::End();
+
+        if (!antennas.empty() && selectedAntennaIdx >= 0 && selectedAntennaIdx < (int)antennas.size()) {
+            const LinkTelemetry& flt = linkState[selectedAntennaIdx];
+            ImGui::SetNextWindowPos(ImVec2((float)WIN_W - 300.0f, uiGap + topH + 6.0f), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowBgAlpha(0.90f);
+            ImGui::Begin("Link Focus", nullptr,
+                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoCollapse);
+            ImGui::Text("Antenna: %s", antennas[selectedAntennaIdx].name.c_str());
+            ImGui::Text("Satellite: %s", satScenario.name.c_str());
+
+            if (!flt.visible) {
+                ImGui::TextColored(ImVec4(0.90f, 0.27f, 0.27f, 1.0f), "Status: RED");
+            } else if (flt.locked && flt.margin_db >= 3.0f) {
+                ImGui::TextColored(ImVec4(0.25f, 0.88f, 0.48f, 1.0f), "Status: GREEN");
+            } else {
+                ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.28f, 1.0f), "Status: YELLOW");
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Elevation: %.1f deg", flt.elevation_deg);
+            ImGui::Text("Range: %.0f km", flt.range_km);
+            ImGui::Text("C/N0: %.1f dB-Hz", flt.cn0_dbhz);
+            ImGui::Text("Eb/N0: %.1f dB", flt.ebn0_db);
+            ImGui::Text("Margin: %.1f dB", flt.margin_db);
+            ImGui::Text("Throughput: %.2f Mbps", flt.throughput_mbps);
+            ImGui::Text("BER: %.3e", flt.ber);
+            ImGui::End();
+        }
 
         // ═══════════════════════════════════════════════════════════
         //  RENDERIZADO 3D
@@ -824,8 +1274,27 @@ int main() {
         glBindVertexArray(earthMesh.vao);
         glDrawElements(GL_TRIANGLES, earthMesh.indexCount, GL_UNSIGNED_INT, 0);
 
-        // --- Satelite ---
-        glm::mat4 satModel = glm::translate(glm::mat4(1.0f), satPos);
+        // --- Antenas ---
+        if (show_antennas) {
+            for (size_t i = 0; i < antennas.size(); ++i) {
+                glm::vec3 local = localFromLatLon(antennas[i].latitude_deg, antennas[i].longitude_deg, EARTH_R * 1.01f);
+                glm::vec3 stationPos = rotateY(local, earth_rotation);
+                glm::mat4 stModel = glm::translate(glm::mat4(1.0f), stationPos) * glm::scale(glm::mat4(1.0f), glm::vec3(0.18f));
+                glUniformMatrix4fv(glGetUniformLocation(progSphere,"uModel"),1,GL_FALSE,glm::value_ptr(stModel));
+                if (linkState[i].visible) glUniform3f(glGetUniformLocation(progSphere,"uColor"),0.2f,0.9f,0.3f);
+                else glUniform3f(glGetUniformLocation(progSphere,"uColor"),0.85f,0.25f,0.25f);
+                glUniform1f(glGetUniformLocation(progSphere,"uAmbient"),0.55f);
+                glUniform1i(glGetUniformLocation(progSphere,"uUseTexture"), 0);
+                glBindVertexArray(satMesh.vao);
+                glDrawArrays(GL_TRIANGLES, 0, satMesh.vertexCount);
+            }
+        }
+
+        // --- Satellite ---
+        float satToCamDist = glm::length(camPos - satPos);
+        float satVisualScale = glm::clamp(0.018f * satToCamDist, 1.2f, 14.0f);
+        glm::mat4 satModel = glm::translate(glm::mat4(1.0f), satPos)
+                   * glm::scale(glm::mat4(1.0f), glm::vec3(satVisualScale));
         glUniformMatrix4fv(glGetUniformLocation(progSphere,"uModel"),1,GL_FALSE,glm::value_ptr(satModel));
         glUniform3f(glGetUniformLocation(progSphere,"uColor"),0.9f,0.85f,0.2f);
         glUniform1f(glGetUniformLocation(progSphere,"uAmbient"),0.4f);
@@ -833,14 +1302,25 @@ int main() {
         glBindVertexArray(satMesh.vao);
         glDrawArrays(GL_TRIANGLES, 0, satMesh.vertexCount);
 
+        // --- Enlaces activos ---
+        if (show_links && lineCount > 0) {
+            glUseProgram(progLine);
+            glUniformMatrix4fv(glGetUniformLocation(progLine, "uMVP"), 1, GL_FALSE, glm::value_ptr(mvp));
+            glUniform3f(glGetUniformLocation(progLine, "uColor"), 0.1f, 0.95f, 0.95f);
+            glBindVertexArray(linkVAO);
+            glLineWidth(1.8f);
+            glDrawArrays(GL_LINES, 0, lineCount * 2);
+        }
+
         // --- Titulo ventana ---
         {
             std::ostringstream t;
             t << std::fixed << std::setprecision(1)
-              << "Simulador Orbital | Alt: " << alt_km << " km"
+              << "Orbital Simulator | Alt: " << alt_km << " km"
               << " | Vel: " << vel_kms << " km/s"
               << " | Warp: x" << time_warp
-              << (paused ? " [PAUSADO]" : "");
+                            << " | Links: " << activeLinks
+              << (paused ? " [PAUSED]" : "");
             glfwSetWindowTitle(window, t.str().c_str());
         }
 
@@ -861,6 +1341,7 @@ int main() {
     deleteLineMesh(orbitPath); deleteLineMesh(axes);
     glDeleteVertexArrays(1,&starVAO);  glDeleteBuffers(1,&starVBO);
     glDeleteVertexArrays(1,&trailVAO); glDeleteBuffers(1,&trailVBO);
+    glDeleteVertexArrays(1,&linkVAO); glDeleteBuffers(1,&linkVBO);
     if (earthTex) glDeleteTextures(1, &earthTex);
     glDeleteProgram(progSphere); glDeleteProgram(progLine);
 
