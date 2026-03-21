@@ -1,31 +1,26 @@
 {
   "antennas": [
     {
-      "name": "Madrid-GS",
-      "latitude_deg": 40.4168,
-      "longitude_deg": -3.7038,
-      "min_elevation_deg": 7.0,
+      "name": "RT-32 Ventspils",
+      "latitude_deg": 57.553387005246655,
+      "longitude_deg": 21.85479027128303,
+      "min_elevation_deg": 2.5,
       "rx_gain_dbi": 32.0,
       "system_temp_k": 220.0,
       "noise_figure_db": 1.1,
       "misc_losses_db": 1.2,
       "tracking": {
-        "slew_az_deg_s": 2.0,
-        "slew_el_deg_s": 2.0
-      }
-    },
-    {
-      "name": "BuenosAires-GS",
-      "latitude_deg": -34.6037,
-      "longitude_deg": -58.3816,
-      "min_elevation_deg": 7.0,
-      "rx_gain_dbi": 30.0,
-      "system_temp_k": 240.0,
-      "noise_figure_db": 1.4,
-      "misc_losses_db": 1.4,
-      "tracking": {
-        "slew_az_deg_s": 2.5,
-        "slew_el_deg_s": 2.5
+        "slew_az_deg_s": 2.8,
+        "slew_el_deg_s": 2.25
+      },
+      "specs": {
+        "diameter_m": 32.0,
+        "primary_mirror_surface_rms_mm": 4.0,
+        "tracking_precision_arcsec": 10.0,
+        "azimuth_limits_deg": [-328.0, 328.0],
+        "elevation_limits_deg": [2.5, 90.0],
+        "azimuth_max_speed_deg_s": 2.8,
+        "elevation_max_speed_deg_s": 2.25
       }
     }
   ]
