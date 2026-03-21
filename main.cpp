@@ -45,6 +45,47 @@ static double last_mx = 0, last_my = 0;
 static float scroll_accum = 0.0f;
 static float time_warp = 100.0f;
 
+static constexpr double SIDEREAL_DAY_SECONDS = 86164.0905;
+
+static double julianDateFromUnix(double unixSeconds) {
+    return unixSeconds / 86400.0 + 2440587.5;
+}
+
+static double gmstRadiansFromUnix(double unixSeconds) {
+    const double jd = julianDateFromUnix(unixSeconds);
+    const double d = jd - 2451545.0;
+    double gmstDeg = 280.46061837 + 360.98564736629 * d;
+    gmstDeg = std::fmod(gmstDeg, 360.0);
+    if (gmstDeg < 0.0) gmstDeg += 360.0;
+    return glm::radians(gmstDeg);
+}
+
+// Approximate solar direction in ECI, then mapped to this renderer axis convention.
+static glm::vec3 sunDirectionFromUnix(double unixSeconds) {
+    const double jd = julianDateFromUnix(unixSeconds);
+    const double n = jd - 2451545.0;
+
+    double L = 280.460 + 0.9856474 * n;
+    double g = 357.528 + 0.9856003 * n;
+    L = std::fmod(L, 360.0);
+    g = std::fmod(g, 360.0);
+    if (L < 0.0) L += 360.0;
+    if (g < 0.0) g += 360.0;
+
+    const double gRad = glm::radians(g);
+    const double lambdaDeg = L + 1.915 * std::sin(gRad) + 0.020 * std::sin(2.0 * gRad);
+    const double epsDeg = 23.439 - 0.0000004 * n;
+
+    const double lambda = glm::radians(lambdaDeg);
+    const double eps = glm::radians(epsDeg);
+
+    const double xEci = std::cos(lambda);
+    const double yEci = std::cos(eps) * std::sin(lambda);
+    const double zEci = std::sin(eps) * std::sin(lambda);
+
+    return glm::normalize(glm::vec3((float)xEci, (float)zEci, (float)yEci));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  SHADERS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -494,15 +535,26 @@ int main() {
     std::vector<AntennaScenario> antennas = loadAntennaScenario("config/antennas.json", cfgDiag);
     SimScenario simScenario = loadSimScenario("config/sim.json", cfgDiag);
     time_warp = simScenario.initial_time_warp;
+    double sim_unix = (double)std::time(nullptr);
 
     // ── Orbita ─────────────────────────────────────────────────────────
     OrbitalElements elems = satScenario.elements;
 
+    auto orbitStartFromUnix = [](const SatelliteScenario& sat, double unixNow) {
+        if (sat.propagator == "sgp4_tle" && sat.tle_loaded) {
+            return std::max(0.0, unixNow - sat.tle_epoch_unix);
+        }
+        Orbit tmp(sat.elements);
+        const double p = tmp.period();
+        if (p <= 0.0) return 0.0;
+        double t = std::fmod(std::max(0.0, unixNow), p);
+        if (t < 0.0) t += p;
+        return t;
+    };
+
     Orbit orbit(elems);
-    if (satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) {
-        orbit.setMeanMotionOverride(satScenario.tle_mean_motion_rad_s);
-        orbit.time = std::max(0.0, (double)std::time(nullptr) - satScenario.tle_epoch_unix);
-    }
+    orbit.setMeanMotionOverride((satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) ? satScenario.tle_mean_motion_rad_s : 0.0);
+    orbit.time = orbitStartFromUnix(satScenario, sim_unix);
     LineMesh orbitPath = createOrbitPath(orbit, EARTH_R);
     LineMesh axes      = createAxes(EARTH_R * 2.0f);
 
@@ -559,7 +611,7 @@ int main() {
     // ── Variables de estado ────────────────────────────────────────────
     double lastTime = glfwGetTime();
     bool paused = false;
-    float earth_rotation = 0.0f;
+    float earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
     bool show_orbit = true, show_axes = true, show_stars = true, show_trail = true;
     bool use_texture = true;
     bool show_antennas = true, show_links = true;
@@ -591,7 +643,6 @@ int main() {
     int lastSatIdx = selectedSatIdx;
     int selectedAntennaIdx = 0;
     std::string exportStatus;
-    double sim_unix = (double)std::time(nullptr);
 
     auto parseNoradFromLine1 = [](const std::string& line1) -> int {
         if (line1.size() < 7 || line1[0] != '1') return -1;
@@ -725,13 +776,13 @@ int main() {
         // ── Simulacion ─────────────────────────────────────────────
         float sim_dt = paused ? 0.0f : dt * time_warp;
         orbit.update(sim_dt);
-        earth_rotation += sim_dt * (float)(2.0 * M_PI / 86400.0); // 1 rotacion = 24h
         glm::vec3 satPos = orbit.posScaled(orbit.time, EARTH_R);
         if (real_utc_mode && !paused && std::abs(time_warp - 1.0f) < 0.001f) {
             sim_unix = (double)std::time(nullptr);
         } else {
             sim_unix += sim_dt;
         }
+        earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
 
         if (selectedSatIdx < 0 || selectedSatIdx >= (int)satellites.size()) selectedSatIdx = 0;
         if (selectedAntennaIdx < 0 || selectedAntennaIdx >= (int)antennas.size()) selectedAntennaIdx = 0;
@@ -739,10 +790,7 @@ int main() {
             satScenario = satellites[selectedSatIdx];
             orbit.el = satScenario.elements;
             orbit.setMeanMotionOverride((satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) ? satScenario.tle_mean_motion_rad_s : 0.0);
-            orbit.time = 0.0;
-            if (satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) {
-                orbit.time = std::max(0.0, (double)std::time(nullptr) - satScenario.tle_epoch_unix);
-            }
+            orbit.time = orbitStartFromUnix(satScenario, sim_unix);
             ui_alt_km   = (float)((satScenario.elements.a - phys::R_EARTH) / 1000.0);
             ui_ecc      = (float)satScenario.elements.e;
             ui_inc_deg  = (float)glm::degrees(satScenario.elements.i);
@@ -993,9 +1041,10 @@ int main() {
                 if (ImGui::Button(paused ? "Resume" : "Pause")) paused = !paused;
                 ImGui::SameLine();
                 if (ImGui::Button("Reset")) {
-                    orbit.time = 0.0;
+                    sim_unix = (double)std::time(nullptr);
+                    orbit.time = orbitStartFromUnix(satScenario, sim_unix);
                     trailCount = 0;
-                    earth_rotation = 0.0f;
+                    earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
                 }
 
                 double elapsed = orbit.time;
@@ -1039,7 +1088,7 @@ int main() {
                     orbit.setMeanMotionOverride(0.0);
                     satScenario.elements = orbit.el;
                     satellites[selectedSatIdx] = satScenario;
-                    orbit.time = 0.0;
+                    orbit.time = orbitStartFromUnix(satScenario, sim_unix);
                     trailCount = 0;
                     deleteLineMesh(orbitPath);
                     orbitPath = createOrbitPath(orbit, EARTH_R);
@@ -1064,7 +1113,7 @@ int main() {
                         orbit.setMeanMotionOverride(0.0);
                         satScenario.elements = orbit.el;
                         satellites[selectedSatIdx] = satScenario;
-                        orbit.time = 0.0;
+                        orbit.time = orbitStartFromUnix(satScenario, sim_unix);
                         trailCount = 0;
                         deleteLineMesh(orbitPath);
                         orbitPath = createOrbitPath(orbit, EARTH_R);
@@ -1099,10 +1148,9 @@ int main() {
                     ui_inc_deg  = (float)glm::degrees(satScenario.elements.i);
                     ui_raan_deg = (float)glm::degrees(satScenario.elements.raan);
                     ui_omg_deg  = (float)glm::degrees(satScenario.elements.omega);
-                    orbit.time = 0.0;
-                    if (satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) {
-                        orbit.time = std::max(0.0, (double)std::time(nullptr) - satScenario.tle_epoch_unix);
-                    }
+                    sim_unix = (double)std::time(nullptr);
+                    orbit.time = orbitStartFromUnix(satScenario, sim_unix);
+                    earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
                     lastSatIdx = selectedSatIdx;
                     trailCount = 0;
                     deleteLineMesh(orbitPath);
@@ -1404,7 +1452,7 @@ int main() {
         glClearColor(0.02f, 0.02f, 0.05f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, 0.3f, 0.5f));
+        glm::vec3 lightDir = sunDirectionFromUnix(sim_unix);
         glm::mat4 mvp = proj * view;
 
         // --- Estrellas ---

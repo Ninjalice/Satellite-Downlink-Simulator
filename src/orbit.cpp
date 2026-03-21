@@ -94,7 +94,7 @@ double Orbit::trueAnomaly(double E) const {
 
 glm::dvec3 Orbit::positionAt(double t) const {
     double n = meanMotion();
-    double M = el.M0 + n * t;
+    double M = el.M0 - n * t;
     M = std::fmod(M, 2.0 * glm::pi<double>());
     double E = solveKepler(M);
     double nu = trueAnomaly(E);
