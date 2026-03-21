@@ -778,7 +778,9 @@ int main() {
         orbit.update(sim_dt);
         glm::vec3 satPos = orbit.posScaled(orbit.time, EARTH_R);
         if (real_utc_mode && !paused && std::abs(time_warp - 1.0f) < 0.001f) {
-            sim_unix = (double)std::time(nullptr);
+            // Keep UTC progression monotonic: never jump backwards after high warp.
+            const double realtime_now = (double)std::time(nullptr);
+            sim_unix = std::max(sim_unix + (double)dt, realtime_now);
         } else {
             sim_unix += sim_dt;
         }
