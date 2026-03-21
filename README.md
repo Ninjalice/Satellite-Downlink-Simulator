@@ -1,28 +1,25 @@
-# 🛰️ Orbital Simulator — Earth + Satellite
+# 🛰️ Satellite Downlink Simulator
 
-A 3D simulator that renders Earth and one or more satellites using Keplerian orbital mechanics, OpenGL 3.3, and Dear ImGui.
+A real-time 3D mission-control app for Earth-to-satellite downlink simulation.
+
+It combines orbital propagation, ground-station tracking, and RF link-budget telemetry in an OpenGL + Dear ImGui interface. You can run custom JSON scenarios, import real satellites from CelesTrak, and track contacts/throughput live.
 
 ![Mission Control Screenshot](project_image.png)
 
 ## Features
 
-- **Real orbital mechanics**: Kepler equation solved with Newton-Raphson.
-- **ISS baseline orbit**: LEO at 408 km, 51.6° inclination, e ≈ 0.0007.
-- **3D rendering**: lit Earth (Blinn-Phong), satellite model, orbit path.
-- **Interactive camera**: rotate and zoom.
-- **Real-time telemetry**: altitude and orbital velocity in the window title.
-- **Starfield background** and satellite trail.
-- **Time control**: accelerate, pause, reset.
-- **JSON scenarios**: loads `config/satellites.json`, `config/antennas.json`, `config/sim.json`.
-- **Ground stations**: geodetic placement on the globe and automatic tracking.
-- **Link simulation**: visibility, AOS/LOS, lock/unlock, FSPL, C/N0, Eb/N0, margin, BER, throughput.
-- **Selectable throughput model**: Shannon or Eb/N0 threshold table.
-- **TLE route**: supports `propagator: "sgp4_tle"` with `tle.line1` and `tle.line2` in `satellites.json`.
-- **Multi-satellite scenarios**: `satellites` array support with active satellite selection in UI.
-- **Stronger JSON validation**: warnings/errors for range, type, and required fields in Diagnostics tab.
-- **Contact summaries**: pass count and current/last contact duration per antenna.
-- **Live history plots**: margin and throughput over time.
-- **Report export**: generates `contact_report.csv`.
+- **Mission-control UI** with tabs for Ops, Links, Contacts, History, Visual, Diagnostics, Events, and Real Satellites.
+- **Orbital propagation** using Keplerian elements plus TLE-based initialization (`sgp4_tle` mode).
+- **3D Earth scene** with lit globe, starfield, orbit path, satellite marker, and optional trail.
+- **Interactive camera and time control**: rotate/zoom, warp, pause, reset.
+- **Ground-station tracking** with azimuth/elevation slewing and lock logic.
+- **Downlink link budget**: visibility, AOS/LOS, FSPL, rain fade, C/N0, Eb/N0, margin, BER, throughput.
+- **Throughput modeling**: Shannon mode or Eb/N0 threshold table.
+- **Scenario-driven setup** from `config/satellites.json`, `config/antennas.json`, and `config/sim.json`.
+- **Real satellite import** from CelesTrak: fetch top active satellites or single NORAD ID from the UI.
+- **Offline cache fallback** for fetched TLEs in `config/.cache`.
+- **Diagnostics and event logging** for config problems, link events, and fetch issues.
+- **CSV export** for contact summaries (`contact_report.csv`).
 
 ## Requirements
 
@@ -109,6 +106,7 @@ You can reload all scenario files at runtime with **Reload JSON** in the Ops tab
 - Real-time communication simulation is active.
 - TLE-based initialization path is active.
 - Active satellite selection for multi-satellite scenarios is active.
+- Real-satellite fetch/import tab is active (CelesTrak + cache).
 
 ## Modifying Orbits
 

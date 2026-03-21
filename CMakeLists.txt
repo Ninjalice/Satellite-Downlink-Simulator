@@ -113,3 +113,7 @@ target_link_libraries(simulator PRIVATE
     imgui_lib
     nlohmann_json::nlohmann_json
 )
+
+if(WIN32)
+    target_link_libraries(simulator PRIVATE winhttp)
+endif()

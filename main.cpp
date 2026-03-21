@@ -30,6 +30,7 @@
 #include <chrono>
 #include <ctime>
 #include <array>
+#include <future>
 
 #include "scenario.h"
 #include "orbit.h"
@@ -371,7 +372,7 @@ int main() {
     glfwWindowHint(GLFW_SAMPLES, 4);
 
     GLFWwindow* window = glfwCreateWindow(WIN_W, WIN_H,
-        "Orbital Simulator", nullptr, nullptr);
+        "Satellite Downlink Simulator", nullptr, nullptr);
     if (!window) { glfwTerminate(); return -1; }
     glfwMakeContextCurrent(window);
 
@@ -569,6 +570,16 @@ int main() {
     float elevation_mask_deg = simScenario.elevation_mask_deg;
     std::vector<LinkTelemetry> linkState(antennas.size());
     std::vector<std::string> eventLog;
+    std::vector<RealSatelliteEntry> realSatCatalog;
+    int realTopCount = 20;
+    int realNoradId = 25544;
+    int realCacheTtlHours = 24;
+    int realSelectedRow = -1;
+    std::string realSatStatus = "Ready to fetch from CelesTrak";
+    bool realFetchInProgress = false;
+    bool realFetchWasTop = true;
+    int realFetchNoradRequested = 0;
+    std::future<RealSatelliteFetch> realFetchFuture;
     std::vector<ContactSummary> contacts(antennas.size());
     std::array<float, 240> marginHist{};
     std::array<float, 240> throughputHist{};
@@ -582,8 +593,80 @@ int main() {
     std::string exportStatus;
     double sim_unix = (double)std::time(nullptr);
 
+    auto parseNoradFromLine1 = [](const std::string& line1) -> int {
+        if (line1.size() < 7 || line1[0] != '1') return -1;
+        try {
+            return std::stoi(line1.substr(2, 5));
+        } catch (...) {
+            return -1;
+        }
+    };
+
+    auto upsertImportedSatellite = [&](const RealSatelliteEntry& entry) -> int {
+        const int incomingNorad = entry.norad_id;
+        for (int i = 0; i < (int)satellites.size(); ++i) {
+            int existingNorad = parseNoradFromLine1(satellites[i].tle_line1);
+            if (incomingNorad > 0 && existingNorad > 0 && incomingNorad == existingNorad) {
+                satellites[i] = entry.satellite;
+                return i;
+            }
+        }
+        for (int i = 0; i < (int)satellites.size(); ++i) {
+            if (satellites[i].name == entry.satellite.name) {
+                satellites[i] = entry.satellite;
+                return i;
+            }
+        }
+        satellites.push_back(entry.satellite);
+        return (int)satellites.size() - 1;
+    };
+
+    auto ingestFetchDiagnostics = [&](const RealSatelliteFetch& fetched) {
+        for (const std::string& w : fetched.warnings) {
+            pushWarn(cfgDiag, "real_sats: " + w);
+        }
+        for (const std::string& e : fetched.errors) {
+            pushErr(cfgDiag, "real_sats: " + e);
+        }
+    };
+
+    auto finalizeRealFetch = [&](const RealSatelliteFetch& fetched) {
+        ingestFetchDiagnostics(fetched);
+        if (realFetchWasTop) {
+            if (!fetched.satellites.empty()) {
+                realSatCatalog = fetched.satellites;
+                realSelectedRow = -1;
+                std::ostringstream st;
+                st << "Fetched " << fetched.satellites.size() << " satellites"
+                   << (fetched.used_cache ? " (cache)" : " (network)");
+                realSatStatus = st.str();
+            } else {
+                realSatStatus = "Fetch Top failed. See Diagnostics for details.";
+            }
+            return;
+        }
+
+        if (!fetched.satellites.empty()) {
+            const RealSatelliteEntry& s = fetched.satellites.front();
+            bool replaced = false;
+            for (RealSatelliteEntry& ex : realSatCatalog) {
+                if ((s.norad_id > 0 && ex.norad_id == s.norad_id) || ex.satellite.name == s.satellite.name) {
+                    ex = s;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) realSatCatalog.push_back(s);
+            std::ostringstream st;
+            st << "Fetched NORAD " << realFetchNoradRequested << (s.from_cache ? " (cache)" : " (network)");
+            realSatStatus = st.str();
+        } else {
+            realSatStatus = "Fetch NORAD failed. See Diagnostics for details.";
+        }
+    };
+
     std::cout << "======================================================\n";
-    std::cout << "  Orbital Simulator - Earth + Satellite\n";
+    std::cout << "  Satellite Downlink Simulator\n";
     std::cout << "  Controls available in the ImGui panel (left)\n";
     std::cout << "  Drag mouse to rotate | Scroll to zoom\n";
     std::cout << "======================================================\n\n";
@@ -859,6 +942,21 @@ int main() {
         kLinks << activeLinks << " / " << antennas.size();
         kThr << std::fixed << std::setprecision(2) << totalThroughput << " Mbps";
         kMargin << std::fixed << std::setprecision(1) << bestMargin << " dB";
+
+        if (realFetchInProgress && realFetchFuture.valid() &&
+            realFetchFuture.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            try {
+                RealSatelliteFetch fetched = realFetchFuture.get();
+                finalizeRealFetch(fetched);
+            } catch (const std::exception& ex) {
+                pushErr(cfgDiag, std::string("real_sats: async fetch failed: ") + ex.what());
+                realSatStatus = "Fetch failed unexpectedly. See Diagnostics.";
+            } catch (...) {
+                pushErr(cfgDiag, "real_sats: async fetch failed with unknown exception");
+                realSatStatus = "Fetch failed unexpectedly. See Diagnostics.";
+            }
+            realFetchInProgress = false;
+        }
 
         ImGui::SetNextWindowPos(ImVec2(leftX, uiGap), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImVec2((float)WIN_W - 2.0f * uiGap, topH), ImGuiCond_Always);
@@ -1156,6 +1254,104 @@ int main() {
                     }
                     ImGui::EndChild();
                 }
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Real Satellites")) {
+                ImGui::SeparatorText("CelesTrak Import");
+                ImGui::SliderInt("Top count", &realTopCount, 5, 50);
+                ImGui::SliderInt("Cache TTL (hours)", &realCacheTtlHours, 1, 168);
+                ImGui::InputInt("NORAD ID", &realNoradId);
+                realNoradId = std::max(1, realNoradId);
+
+                if (realFetchInProgress) {
+                    const char spinner[4] = {'|', '/', '-', '\\'};
+                    int frame = ((int)(glfwGetTime() * 8.0)) & 3;
+                    ImGui::Text("Loading %c Fetch in progress...", spinner[frame]);
+                }
+
+                ImGui::BeginDisabled(realFetchInProgress);
+
+                if (ImGui::Button("Fetch Top")) {
+                    const int topCount = realTopCount;
+                    const int ttlSeconds = realCacheTtlHours * 3600;
+                    realFetchWasTop = true;
+                    realFetchNoradRequested = 0;
+                    realSatStatus = "Fetching top satellites...";
+                    realFetchFuture = std::async(std::launch::async, [topCount, ttlSeconds]() {
+                        return fetchTopRealSatellites(topCount, ttlSeconds);
+                    });
+                    realFetchInProgress = true;
+                }
+
+                ImGui::SameLine();
+                if (ImGui::Button("Fetch NORAD")) {
+                    const int norad = realNoradId;
+                    const int ttlSeconds = realCacheTtlHours * 3600;
+                    realFetchWasTop = false;
+                    realFetchNoradRequested = norad;
+                    realSatStatus = "Fetching NORAD " + std::to_string(norad) + "...";
+                    realFetchFuture = std::async(std::launch::async, [norad, ttlSeconds]() {
+                        return fetchRealSatelliteByNorad(norad, ttlSeconds);
+                    });
+                    realFetchInProgress = true;
+                }
+
+                ImGui::EndDisabled();
+
+                ImGui::TextWrapped("%s", realSatStatus.c_str());
+
+                if (ImGui::BeginTable("real_sats", 8, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 270))) {
+                    ImGui::TableSetupColumn("Name");
+                    ImGui::TableSetupColumn("NORAD");
+                    ImGui::TableSetupColumn("Alt (km)");
+                    ImGui::TableSetupColumn("TLE age (h)");
+                    ImGui::TableSetupColumn("Cache");
+                    ImGui::TableSetupColumn("Active");
+                    ImGui::TableSetupColumn("Import");
+                    ImGui::TableSetupColumn("Track");
+                    ImGui::TableHeadersRow();
+
+                    for (int i = 0; i < (int)realSatCatalog.size(); ++i) {
+                        const RealSatelliteEntry& rs = realSatCatalog[i];
+                        float altKm = (float)((rs.satellite.elements.a - phys::R_EARTH) / 1000.0);
+                        float ageHours = (float)std::max(0.0, ((double)std::time(nullptr) - rs.satellite.tle_epoch_unix) / 3600.0);
+
+                        ImGui::TableNextRow();
+                        ImGui::TableSetColumnIndex(0);
+                        if (ImGui::Selectable((rs.satellite.name + "##realsat").c_str(), realSelectedRow == i)) {
+                            realSelectedRow = i;
+                        }
+                        ImGui::TableSetColumnIndex(1);
+                        if (rs.norad_id > 0) ImGui::Text("%d", rs.norad_id); else ImGui::TextUnformatted("-");
+                        ImGui::TableSetColumnIndex(2); ImGui::Text("%.1f", altKm);
+                        ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f", ageHours);
+                        ImGui::TableSetColumnIndex(4); ImGui::TextUnformatted(rs.from_cache ? "yes" : "no");
+                        ImGui::TableSetColumnIndex(5);
+                        bool isActive = (selectedSatIdx >= 0 && selectedSatIdx < (int)satellites.size())
+                                     && (satellites[selectedSatIdx].name == rs.satellite.name);
+                        ImGui::TextUnformatted(isActive ? "yes" : "no");
+                        ImGui::TableSetColumnIndex(6);
+                        if (ImGui::SmallButton(("Import##" + std::to_string(i)).c_str())) {
+                            int importedIdx = upsertImportedSatellite(rs);
+                            std::ostringstream st;
+                            st << "Imported " << rs.satellite.name << " at slot " << importedIdx << ". Use Track to activate.";
+                            realSatStatus = st.str();
+                        }
+                        ImGui::TableSetColumnIndex(7);
+                        if (ImGui::SmallButton(("Track##" + std::to_string(i)).c_str())) {
+                            selectedSatIdx = upsertImportedSatellite(rs);
+                            lastSatIdx = -1; // Force satellite re-activation logic in next frame.
+                            std::ostringstream ev;
+                            ev << "[" << utcStringFromUnix(sim_unix) << "] TRACK " << rs.satellite.name;
+                            eventLog.push_back(ev.str());
+                            realSatStatus = "Tracking " + rs.satellite.name;
+                        }
+                    }
+                    ImGui::EndTable();
+                }
+
+                ImGui::Text("Imported satellites in scenario: %d", (int)satellites.size());
                 ImGui::EndTabItem();
             }
 

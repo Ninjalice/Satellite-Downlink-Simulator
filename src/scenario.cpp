@@ -1,9 +1,20 @@
 #include "scenario.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <winhttp.h>
+#endif
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -369,4 +380,389 @@ SimScenario loadSimScenario(const std::string& path, ConfigDiagnostics& diag) {
     }
 
     return sim;
+}
+
+namespace {
+
+static std::vector<std::string> splitLines(const std::string& text) {
+    std::vector<std::string> out;
+    std::istringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        out.push_back(line);
+    }
+    return out;
+}
+
+static int tryParseNoradIdFromLine1(const std::string& line1) {
+    if (line1.size() < 7 || line1[0] != '1') return -1;
+    try {
+        return std::stoi(trim(line1.substr(2, 5)));
+    } catch (...) {
+        return -1;
+    }
+}
+
+static std::string sanitizeFileToken(const std::string& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (char c : value) {
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') || c == '_' || c == '-' || c == '.') {
+            out.push_back(c);
+        } else {
+            out.push_back('_');
+        }
+    }
+    return out;
+}
+
+static std::string readTextFile(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in.good()) return "";
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+static bool writeTextFile(const std::filesystem::path& p, const std::string& content) {
+    std::ofstream out(p, std::ios::binary);
+    if (!out.good()) return false;
+    out.write(content.data(), (std::streamsize)content.size());
+    return out.good();
+}
+
+static bool isCacheFresh(const std::filesystem::path& p, int ttlSeconds) {
+    if (!std::filesystem::exists(p)) return false;
+    if (ttlSeconds <= 0) return false;
+    std::error_code ec;
+    auto t = std::filesystem::last_write_time(p, ec);
+    if (ec) return false;
+    auto now = decltype(t)::clock::now();
+    auto age = std::chrono::duration_cast<std::chrono::seconds>(now - t).count();
+    return age >= 0 && age <= ttlSeconds;
+}
+
+#ifdef _WIN32
+static std::wstring utf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (needed <= 0) return L"";
+    std::wstring out((size_t)needed, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), needed);
+    return out;
+}
+
+static bool httpGet(const std::string& url, std::string& body, std::string& err) {
+    body.clear();
+    err.clear();
+
+    std::wstring wurl = utf8ToWide(url);
+    if (wurl.empty()) {
+        err = "Invalid URL";
+        return false;
+    }
+
+    URL_COMPONENTS comps{};
+    wchar_t host[256]{};
+    wchar_t path[2048]{};
+    comps.dwStructSize = sizeof(comps);
+    comps.lpszHostName = host;
+    comps.dwHostNameLength = (DWORD)(sizeof(host) / sizeof(host[0]));
+    comps.lpszUrlPath = path;
+    comps.dwUrlPathLength = (DWORD)(sizeof(path) / sizeof(path[0]));
+    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &comps)) {
+        err = "Could not parse URL";
+        return false;
+    }
+
+    std::wstring hostW(host, comps.dwHostNameLength);
+    std::wstring pathW(path, comps.dwUrlPathLength);
+
+    HINTERNET hSession = WinHttpOpen(L"SatelliteDownlinkSimulator/1.0",
+                                     WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                     WINHTTP_NO_PROXY_NAME,
+                                     WINHTTP_NO_PROXY_BYPASS,
+                                     0);
+    if (!hSession) {
+        err = "WinHTTP session failed";
+        return false;
+    }
+
+    HINTERNET hConnect = WinHttpConnect(hSession, hostW.c_str(), comps.nPort, 0);
+    if (!hConnect) {
+        WinHttpCloseHandle(hSession);
+        err = "WinHTTP connect failed";
+        return false;
+    }
+
+    DWORD reqFlags = (comps.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect,
+                                            L"GET",
+                                            pathW.c_str(),
+                                            nullptr,
+                                            WINHTTP_NO_REFERER,
+                                            WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                            reqFlags);
+    if (!hRequest) {
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        err = "WinHTTP request failed";
+        return false;
+    }
+
+    DWORD timeoutMs = 12000;
+    WinHttpSetTimeouts(hRequest, timeoutMs, timeoutMs, timeoutMs, timeoutMs);
+
+    BOOL sent = WinHttpSendRequest(hRequest,
+                                   WINHTTP_NO_ADDITIONAL_HEADERS,
+                                   0,
+                                   WINHTTP_NO_REQUEST_DATA,
+                                   0,
+                                   0,
+                                   0);
+    if (!sent || !WinHttpReceiveResponse(hRequest, nullptr)) {
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        err = "HTTP request failed";
+        return false;
+    }
+
+    DWORD status = 0;
+    DWORD statusSize = sizeof(status);
+    WinHttpQueryHeaders(hRequest,
+                        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX,
+                        &status,
+                        &statusSize,
+                        WINHTTP_NO_HEADER_INDEX);
+    if (status < 200 || status >= 300) {
+        std::ostringstream msg;
+        msg << "HTTP status " << status;
+        err = msg.str();
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    std::string result;
+    for (;;) {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(hRequest, &available)) {
+            err = "HTTP read failed";
+            break;
+        }
+        if (available == 0) break;
+        std::string chunk(available, '\0');
+        DWORD downloaded = 0;
+        if (!WinHttpReadData(hRequest, chunk.data(), available, &downloaded)) {
+            err = "HTTP read data failed";
+            break;
+        }
+        chunk.resize(downloaded);
+        result += chunk;
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    if (!err.empty()) return false;
+    body = result;
+    return true;
+}
+#else
+static bool httpGet(const std::string&, std::string&, std::string& err) {
+    err = "Real satellite fetch is currently supported on Windows builds only";
+    return false;
+}
+#endif
+
+static std::vector<RealSatelliteEntry> parseTleText(const std::string& text,
+                                                    const std::string& source,
+                                                    int maxCount,
+                                                    std::vector<std::string>& errors) {
+    std::vector<RealSatelliteEntry> out;
+    auto lines = splitLines(text);
+    for (size_t i = 0; i < lines.size(); ) {
+        if (maxCount > 0 && (int)out.size() >= maxCount) break;
+
+        std::string name;
+        std::string l1;
+        std::string l2;
+
+        if (i + 2 < lines.size() && !lines[i].empty() && lines[i][0] != '1') {
+            name = trim(lines[i]);
+            l1 = trim(lines[i + 1]);
+            l2 = trim(lines[i + 2]);
+            i += 3;
+        } else if (i + 1 < lines.size() && !lines[i].empty() && lines[i][0] == '1') {
+            l1 = trim(lines[i]);
+            l2 = trim(lines[i + 1]);
+            i += 2;
+        } else {
+            i++;
+            continue;
+        }
+
+        if (l1.empty() || l2.empty() || l1[0] != '1' || l2[0] != '2') {
+            continue;
+        }
+
+        int noradId = tryParseNoradIdFromLine1(l1);
+        if (name.empty()) {
+            name = (noradId > 0) ? ("NORAD " + std::to_string(noradId)) : "Unknown";
+        }
+
+        SatelliteScenario sat = defaultSatellite();
+        sat.name = name;
+        sat.propagator = "sgp4_tle";
+        sat.tle_line1 = l1;
+        sat.tle_line2 = l2;
+
+        std::string tleErr;
+        if (!parseTleToOrbit(l1, l2, sat.elements, sat.tle_mean_motion_rad_s, sat.tle_epoch_unix, tleErr)) {
+            errors.push_back("TLE parse failed for " + sat.name + ": " + tleErr);
+            continue;
+        }
+        sat.tle_loaded = true;
+
+        RealSatelliteEntry e;
+        e.satellite = sat;
+        e.norad_id = noradId;
+        e.source = source;
+        e.fetched_unix = (double)std::time(nullptr);
+        out.push_back(e);
+    }
+    return out;
+}
+
+static std::filesystem::path cacheDir() {
+    return std::filesystem::path("config") / ".cache";
+}
+
+static std::filesystem::path topCachePath() {
+    return cacheDir() / "celestrak_top_active.tle";
+}
+
+static std::filesystem::path noradCachePath(int noradId) {
+    return cacheDir() / ("celestrak_norad_" + sanitizeFileToken(std::to_string(noradId)) + ".tle");
+}
+
+static void ensureCacheDir() {
+    std::error_code ec;
+    std::filesystem::create_directories(cacheDir(), ec);
+}
+
+} // namespace
+
+RealSatelliteFetch fetchTopRealSatellites(int maxCount, int cacheTtlSeconds) {
+    RealSatelliteFetch result;
+    maxCount = std::max(1, maxCount);
+
+    const std::string url = "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle";
+    const std::filesystem::path cache = topCachePath();
+    ensureCacheDir();
+
+    auto parseAndAnnotate = [&](const std::string& text, bool fromCache) {
+        std::vector<std::string> parseErrors;
+        result.satellites = parseTleText(text, "CelesTrak/active", maxCount, parseErrors);
+        for (const auto& pe : parseErrors) result.warnings.push_back(pe);
+        for (auto& sat : result.satellites) {
+            sat.from_cache = fromCache;
+        }
+    };
+
+    if (isCacheFresh(cache, cacheTtlSeconds)) {
+        std::string cached = readTextFile(cache);
+        if (!cached.empty()) {
+            parseAndAnnotate(cached, true);
+            result.used_cache = !result.satellites.empty();
+            if (!result.satellites.empty()) return result;
+        }
+    }
+
+    std::string body;
+    std::string err;
+    if (httpGet(url, body, err)) {
+        result.used_network = true;
+        writeTextFile(cache, body);
+        parseAndAnnotate(body, false);
+        if (!result.satellites.empty()) {
+            return result;
+        }
+        result.errors.push_back("CelesTrak response parsed as empty list");
+    } else {
+        result.errors.push_back("CelesTrak fetch failed: " + err);
+    }
+
+    std::string stale = readTextFile(cache);
+    if (!stale.empty()) {
+        parseAndAnnotate(stale, true);
+        result.used_cache = !result.satellites.empty();
+        if (!result.satellites.empty()) {
+            result.warnings.push_back("Using stale cache for top real satellites");
+        }
+    }
+
+    return result;
+}
+
+RealSatelliteFetch fetchRealSatelliteByNorad(int noradId, int cacheTtlSeconds) {
+    RealSatelliteFetch result;
+    if (noradId <= 0) {
+        result.errors.push_back("NORAD ID must be positive");
+        return result;
+    }
+
+    const std::string url = "https://celestrak.org/NORAD/elements/gp.php?CATNR=" + std::to_string(noradId) + "&FORMAT=tle";
+    const std::filesystem::path cache = noradCachePath(noradId);
+    ensureCacheDir();
+
+    auto parseAndAnnotate = [&](const std::string& text, bool fromCache) {
+        std::vector<std::string> parseErrors;
+        result.satellites = parseTleText(text, "CelesTrak/catnr", 1, parseErrors);
+        for (const auto& pe : parseErrors) result.warnings.push_back(pe);
+        for (auto& sat : result.satellites) {
+            sat.from_cache = fromCache;
+            if (sat.norad_id <= 0) sat.norad_id = noradId;
+        }
+    };
+
+    if (isCacheFresh(cache, cacheTtlSeconds)) {
+        std::string cached = readTextFile(cache);
+        if (!cached.empty()) {
+            parseAndAnnotate(cached, true);
+            result.used_cache = !result.satellites.empty();
+            if (!result.satellites.empty()) return result;
+        }
+    }
+
+    std::string body;
+    std::string err;
+    if (httpGet(url, body, err)) {
+        result.used_network = true;
+        writeTextFile(cache, body);
+        parseAndAnnotate(body, false);
+        if (!result.satellites.empty()) {
+            return result;
+        }
+        result.errors.push_back("No TLE returned for NORAD " + std::to_string(noradId));
+    } else {
+        result.errors.push_back("CelesTrak fetch failed: " + err);
+    }
+
+    std::string stale = readTextFile(cache);
+    if (!stale.empty()) {
+        parseAndAnnotate(stale, true);
+        result.used_cache = !result.satellites.empty();
+        if (!result.satellites.empty()) {
+            result.warnings.push_back("Using stale cache for NORAD " + std::to_string(noradId));
+        }
+    }
+
+    return result;
 }

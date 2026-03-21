@@ -65,6 +65,22 @@ struct SatelliteScenario {
     double required_ebn0_db = 4.5;
 };
 
+struct RealSatelliteEntry {
+    SatelliteScenario satellite{};
+    int norad_id = -1;
+    std::string source;
+    double fetched_unix = 0.0;
+    bool from_cache = false;
+};
+
+struct RealSatelliteFetch {
+    std::vector<RealSatelliteEntry> satellites;
+    std::vector<std::string> warnings;
+    std::vector<std::string> errors;
+    bool used_cache = false;
+    bool used_network = false;
+};
+
 struct LinkTelemetry {
     bool visible = false;
     bool locked = false;
@@ -113,3 +129,6 @@ void pushErr(ConfigDiagnostics& d, const std::string& msg);
 std::vector<SatelliteScenario> loadSatelliteScenarios(const std::string& path, ConfigDiagnostics& diag);
 std::vector<AntennaScenario> loadAntennaScenario(const std::string& path, ConfigDiagnostics& diag);
 SimScenario loadSimScenario(const std::string& path, ConfigDiagnostics& diag);
+
+RealSatelliteFetch fetchTopRealSatellites(int maxCount, int cacheTtlSeconds = 24 * 3600);
+RealSatelliteFetch fetchRealSatelliteByNorad(int noradId, int cacheTtlSeconds = 24 * 3600);
