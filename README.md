@@ -1,25 +1,26 @@
 # 🛰️ Satellite Downlink Simulator
 
-A real-time 3D mission-control app for Earth-to-satellite downlink simulation.
+A real-time 3D mission-control app for Earth and Moon satellite downlink simulation.
 
-It combines orbital propagation, ground-station tracking, and RF link-budget telemetry in an OpenGL + Dear ImGui interface. You can run custom JSON scenarios, import real satellites from CelesTrak, and track contacts/throughput live.
+It combines orbital propagation, ground-station tracking, and RF link-budget telemetry in an OpenGL + Dear ImGui interface. You can run custom JSON scenarios, import real satellites from CelesTrak, and track contacts/throughput live around Earth or the Moon.
 
-![Mission Control Screenshot](project_image.png)
+![Mission Control Screenshot](project_image.jpg)
 
 ## Features
 
 - **Mission-control UI** with tabs for Ops, Links, Contacts, History, Visual, Diagnostics, Events, and Real Satellites.
-- **Orbital propagation** using Keplerian elements plus TLE-based initialization (`sgp4_tle` mode).
-- **3D Earth scene** with lit globe, starfield, orbit path, satellite marker, and optional trail.
+- **Orbital propagation** using Keplerian elements plus TLE-based initialization (`sgp4_tle` mode), for Earth-centered and Moon-centered cases.
+- **3D Earth + Moon scene** with lit bodies, textured Milky Way background, orbit paths, satellite marker, and optional trail.
 - **Interactive camera and time control**: rotate/zoom, warp, pause, reset.
-- **Ground-station tracking** with azimuth/elevation slewing and lock logic.
-- **Downlink link budget**: visibility, AOS/LOS, FSPL, rain fade, C/N0, Eb/N0, margin, BER, throughput.
+- **Ground-station tracking** with azimuth/elevation slewing and lock logic for Earth and lunar scenarios.
+- **Downlink link budget**: visibility, AOS/LOS, FSPL, rain fade, C/N0, Eb/N0, margin, BER, throughput, including Moon-occlusion checks.
 - **Throughput modeling**: Shannon mode or Eb/N0 threshold table.
 - **Scenario-driven setup** from `config/satellites.json`, `config/antennas.json`, and `config/sim.json`.
 - **Real satellite import** from CelesTrak: fetch top active satellites or single NORAD ID from the UI.
 - **Offline cache fallback** for fetched TLEs in `config/.cache`.
 - **Diagnostics and event logging** for config problems, link events, and fetch issues.
 - **CSV export** for contact summaries (`contact_report.csv`).
+- **Lunar controls**: Moon focus, lunar orbit rendering, larger deep-space warp range, and Warp to Trackable for lunar passes.
 
 ## Requirements
 
@@ -103,6 +104,7 @@ You can reload all scenario files at runtime with **Reload JSON** in the Ops tab
 
 - JSON-driven configuration flow is active.
 - Ground-station placement and tracking on globe is active.
+- Earth-to-satellite and Moon-to-satellite workflows are active.
 - Real-time communication simulation is active.
 - TLE-based initialization path is active.
 - Active satellite selection for multi-satellite scenarios is active.
