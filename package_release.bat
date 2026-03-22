@@ -71,9 +71,24 @@ if errorlevel 1 (
     exit /b 1
 )
 
+if not exist "textures" (
+    echo ERROR: Missing textures folder.
+    popd >nul
+    pause
+    exit /b 1
+)
+xcopy "textures" "%PKG_DIR%\textures\" /E /I /Y >nul
+if errorlevel 1 (
+    echo ERROR: Could not copy textures folder.
+    popd >nul
+    pause
+    exit /b 1
+)
+
 if exist "README.md" copy /y "README.md" "%PKG_DIR%\" >nul
 if exist "earth_texture.jpg" copy /y "earth_texture.jpg" "%PKG_DIR%\" >nul
 if exist "earth_texture.png" copy /y "earth_texture.png" "%PKG_DIR%\" >nul
+if exist "imgui.ini" copy /y "imgui.ini" "%PKG_DIR%\" >nul
 
 echo [4/5] Creating zip...
 if exist "%ZIP_NAME%" del /f /q "%ZIP_NAME%" >nul 2>&1
