@@ -46,6 +46,9 @@ static float scroll_accum = 0.0f;
 static float time_warp = 100.0f;
 
 static constexpr double SIDEREAL_DAY_SECONDS = 86164.0905;
+static constexpr double LUNAR_SIDEREAL_PERIOD_SECONDS = 27.321661 * 86400.0;
+static constexpr double EARTH_MOON_MEAN_DISTANCE_M = 384400000.0;
+static constexpr double MOON_ORBIT_INCLINATION_RAD = 0.08979719; // 5.145 deg
 
 static double julianDateFromUnix(double unixSeconds) {
     return unixSeconds / 86400.0 + 2440587.5;
@@ -84,6 +87,38 @@ static glm::vec3 sunDirectionFromUnix(double unixSeconds) {
     const double zEci = std::sin(eps) * std::sin(lambda);
 
     return glm::normalize(glm::vec3((float)xEci, (float)zEci, (float)yEci));
+}
+
+static glm::vec3 moonPositionWorldFromUnix(double unixSeconds, float earthRenderRadius) {
+    const double metersToWorld = (double)earthRenderRadius / phys::R_EARTH;
+    const double orbitRadiusWorld = EARTH_MOON_MEAN_DISTANCE_M * metersToWorld;
+    const double phase = std::fmod(unixSeconds, LUNAR_SIDEREAL_PERIOD_SECONDS) / LUNAR_SIDEREAL_PERIOD_SECONDS;
+    const double ang = phase * 2.0 * glm::pi<double>();
+
+    glm::dvec3 pos(orbitRadiusWorld * std::cos(ang), 0.0, orbitRadiusWorld * std::sin(ang));
+    glm::dmat4 tilt = glm::rotate(glm::dmat4(1.0), MOON_ORBIT_INCLINATION_RAD, glm::dvec3(1.0, 0.0, 0.0));
+    glm::dvec4 tilted = tilt * glm::dvec4(pos, 1.0);
+    return glm::vec3((float)tilted.x, (float)tilted.y, (float)tilted.z);
+}
+
+static bool segmentIntersectsSphere(const glm::vec3& a, const glm::vec3& b,
+                                    const glm::vec3& center, float radius,
+                                    float tMin = 0.001f, float tMax = 0.999f) {
+    glm::vec3 d = b - a;
+    glm::vec3 f = a - center;
+
+    float A = glm::dot(d, d);
+    float B = 2.0f * glm::dot(f, d);
+    float C = glm::dot(f, f) - radius * radius;
+    float disc = B * B - 4.0f * A * C;
+    if (disc < 0.0f || A <= 1e-9f) return false;
+
+    float s = std::sqrt(disc);
+    float inv = 0.5f / A;
+    float t1 = (-B - s) * inv;
+    float t2 = (-B + s) * inv;
+    if (t1 > t2) std::swap(t1, t2);
+    return t2 >= tMin && t1 <= tMax;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,9 +162,15 @@ uniform vec3  uViewPos;
 uniform float uAmbient;
 uniform sampler2D uTexture;
 uniform int   uUseTexture;
+uniform int   uUnlit;
 
 void main() {
     vec3 baseColor = (uUseTexture == 1) ? texture(uTexture, vTexCoord).rgb : uColor;
+
+    if (uUnlit == 1) {
+        FragColor = vec4(baseColor, 1.0);
+        return;
+    }
 
     vec3 N = normalize(vNormal);
     vec3 L = normalize(uLightDir);
@@ -285,6 +326,26 @@ LineMesh createOrbitPath(const Orbit& orb, float er, int seg = 500) {
         v.push_back(p.x); v.push_back(p.y); v.push_back(p.z);
     }
     return createLineMesh(v, seg+1);
+}
+
+LineMesh createMoonOrbitPath(float earthRenderRadius, int seg = 720) {
+    std::vector<float> v;
+    v.reserve((seg + 1) * 3);
+
+    const double metersToWorld = (double)earthRenderRadius / phys::R_EARTH;
+    const double orbitRadiusWorld = EARTH_MOON_MEAN_DISTANCE_M * metersToWorld;
+    const glm::dmat4 tilt = glm::rotate(glm::dmat4(1.0), MOON_ORBIT_INCLINATION_RAD, glm::dvec3(1.0, 0.0, 0.0));
+
+    for (int i = 0; i <= seg; ++i) {
+        const double ang = (2.0 * glm::pi<double>() * (double)i) / (double)seg;
+        glm::dvec3 p(orbitRadiusWorld * std::cos(ang), 0.0, orbitRadiusWorld * std::sin(ang));
+        glm::dvec4 tilted = tilt * glm::dvec4(p, 1.0);
+        v.push_back((float)tilted.x);
+        v.push_back((float)tilted.y);
+        v.push_back((float)tilted.z);
+    }
+
+    return createLineMesh(v, seg + 1);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -481,7 +542,10 @@ int main() {
 
     // ── Geometria ──────────────────────────────────────────────────────
     const float EARTH_R = 8.0f;
+    const float MOON_R = EARTH_R * (float)(phys::R_MOON / phys::R_EARTH);
     SphereMesh earthMesh = createSphere(EARTH_R, 64, 32);
+    SphereMesh moonMesh = createSphere(MOON_R, 48, 24);
+    SphereMesh skyMesh = createSphere(3000.0f, 48, 24);
     // Satelite: cubo pequeno
     struct CubeMesh { GLuint vao=0, vbo=0; int vertexCount=0; };
     CubeMesh satMesh;
@@ -527,6 +591,16 @@ int main() {
         hasRealTexture = true;
     }
 
+    GLuint moonTex = loadTextureFromFile("textures/2k_moon.jpg");
+    if (!moonTex) {
+        std::cout << "[WARN] textures/2k_moon.jpg not found, moon will use flat color.\n";
+    }
+
+    GLuint skyTex = loadTextureFromFile("textures/2k_stars_milky_way.jpg");
+    if (!skyTex) {
+        std::cout << "[WARN] textures/2k_stars_milky_way.jpg not found, clear color fallback active.\n";
+    }
+
     // ── Escenario JSON ─────────────────────────────────────────────────
     ConfigDiagnostics cfgDiag;
     std::vector<SatelliteScenario> satellites = loadSatelliteScenarios("config/satellites.json", cfgDiag);
@@ -540,11 +614,15 @@ int main() {
     // ── Orbita ─────────────────────────────────────────────────────────
     OrbitalElements elems = satScenario.elements;
 
-    auto orbitStartFromUnix = [](const SatelliteScenario& sat, double unixNow) {
+    auto renderRadiusForCenter = [&](const std::string& center) -> float {
+        return (normalizeOrbitalCenter(center) == "moon") ? MOON_R : EARTH_R;
+    };
+
+    auto orbitStartFromUnix = [&](const SatelliteScenario& sat, double unixNow) {
         if (sat.propagator == "sgp4_tle" && sat.tle_loaded) {
             return std::max(0.0, unixNow - sat.tle_epoch_unix);
         }
-        Orbit tmp(sat.elements);
+        Orbit tmp(sat.elements, orbitalCenterMu(sat.orbital_center), orbitalCenterRadius(sat.orbital_center));
         const double p = tmp.period();
         if (p <= 0.0) return 0.0;
         double t = std::fmod(std::max(0.0, unixNow), p);
@@ -552,43 +630,26 @@ int main() {
         return t;
     };
 
-    Orbit orbit(elems);
+    Orbit orbit(elems, orbitalCenterMu(satScenario.orbital_center), orbitalCenterRadius(satScenario.orbital_center));
     orbit.setMeanMotionOverride((satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) ? satScenario.tle_mean_motion_rad_s : 0.0);
     orbit.time = orbitStartFromUnix(satScenario, sim_unix);
-    LineMesh orbitPath = createOrbitPath(orbit, EARTH_R);
+    LineMesh orbitPath = createOrbitPath(orbit, renderRadiusForCenter(satScenario.orbital_center));
+    LineMesh moonOrbitPath = createMoonOrbitPath(EARTH_R);
     LineMesh axes      = createAxes(EARTH_R * 2.0f);
 
     // Parametros editables (para ImGui)
-    float ui_alt_km   = (float)((satScenario.elements.a - phys::R_EARTH) / 1000.0);
+    float ui_alt_km   = (float)((satScenario.elements.a - orbitalCenterRadius(satScenario.orbital_center)) / 1000.0);
     float ui_ecc      = (float)satScenario.elements.e;
     float ui_inc_deg  = (float)glm::degrees(satScenario.elements.i);
     float ui_raan_deg = (float)glm::degrees(satScenario.elements.raan);
     float ui_omg_deg  = (float)glm::degrees(satScenario.elements.omega);
 
-    // ── Estrellas ──────────────────────────────────────────────────────
-    std::vector<float> starVerts;
-    srand(42);
-    for (int i = 0; i < 3000; ++i) {
-        float th = ((float)rand()/RAND_MAX)*2.0f*glm::pi<float>();
-        float ph = std::acos(2.0f*((float)rand()/RAND_MAX)-1.0f);
-        float r  = 150.0f;
-        starVerts.push_back(r*std::sin(ph)*std::cos(th));
-        starVerts.push_back(r*std::cos(ph));
-        starVerts.push_back(r*std::sin(ph)*std::sin(th));
-    }
-    GLuint starVAO, starVBO;
-    glGenVertexArrays(1,&starVAO); glGenBuffers(1,&starVBO);
-    glBindVertexArray(starVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, starVBO);
-    glBufferData(GL_ARRAY_BUFFER, starVerts.size()*sizeof(float), starVerts.data(), GL_STATIC_DRAW);
-    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,3*sizeof(float),(void*)0);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
-
     // ── Trail ──────────────────────────────────────────────────────────
     const int TRAIL_MAX = 800;
     std::vector<float> trailVerts(TRAIL_MAX*3, 0.0f);
-    int trailCount = 0; float trailTimer = 0.0f;
+    int trailCount = 0;
+    int trailHead = 0;
+    float trailTimer = 0.0f;
     GLuint trailVAO, trailVBO;
     glGenVertexArrays(1,&trailVAO); glGenBuffers(1,&trailVBO);
     glBindVertexArray(trailVAO);
@@ -613,8 +674,11 @@ int main() {
     bool paused = false;
     float earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
     bool show_orbit = true, show_axes = true, show_stars = true, show_trail = true;
+    bool show_moon_orbit = true;
     bool use_texture = true;
     bool show_antennas = true, show_links = true;
+    float sat_size_multiplier = 1.25f;
+    int cameraFocusMode = 0; // 0 Earth, 1 Moon, 2 Satellite
     bool use_shannon_model = simScenario.use_shannon_model;
     bool real_utc_mode = simScenario.real_utc_default;
     float rain_rate_mm_h = simScenario.rain_rate_mm_h;
@@ -716,6 +780,42 @@ int main() {
         }
     };
 
+    auto findNextTrackableWarpSeconds = [&]() -> double {
+        if (antennas.empty()) return -1.0;
+
+        const float satRenderR = renderRadiusForCenter(satScenario.orbital_center);
+        const bool satAroundMoonNow = normalizeOrbitalCenter(satScenario.orbital_center) == "moon";
+        const double horizonSeconds = 72.0 * 3600.0;
+        const double stepSeconds = 20.0;
+        const double baseOrbitTime = orbit.time;
+
+        for (double dtSearch = stepSeconds; dtSearch <= horizonSeconds; dtSearch += stepSeconds) {
+            const double probeUnix = sim_unix + dtSearch;
+            const float probeEarthRot = (float)(gmstRadiansFromUnix(probeUnix));
+            const glm::vec3 probeMoonPos = moonPositionWorldFromUnix(probeUnix, EARTH_R);
+            const glm::vec3 probeSatRel = orbit.posScaled(baseOrbitTime + dtSearch, satRenderR);
+            const glm::vec3 probeSatPos = (satAroundMoonNow ? probeMoonPos : glm::vec3(0.0f)) + probeSatRel;
+
+            for (const AntennaScenario& ant : antennas) {
+                glm::vec3 local = localFromLatLon(ant.latitude_deg, ant.longitude_deg, EARTH_R);
+                glm::vec3 stationPos = rotateY(local, probeEarthRot);
+                glm::vec3 up = glm::normalize(rotateY(glm::normalize(local), probeEarthRot));
+                glm::vec3 rangeVec = probeSatPos - stationPos;
+                float rangeWorld = glm::length(rangeVec);
+                if (rangeWorld <= 0.0f) continue;
+
+                glm::vec3 ur = rangeVec / rangeWorld;
+                float elevationDeg = glm::degrees(std::asin(glm::clamp(glm::dot(ur, up), -1.0f, 1.0f)));
+                bool blockedByMoon = segmentIntersectsSphere(stationPos, probeSatPos, probeMoonPos, MOON_R * 1.001f);
+                if (elevationDeg >= std::max(elevation_mask_deg, ant.min_elevation_deg) && !blockedByMoon) {
+                    return dtSearch;
+                }
+            }
+        }
+
+        return -1.0;
+    };
+
     std::cout << "======================================================\n";
     std::cout << "  Satellite Downlink Simulator\n";
     std::cout << "  Controls available in the ImGui panel (left)\n";
@@ -740,7 +840,7 @@ int main() {
             // Scroll → zoom
             if (scroll_accum != 0.0f) {
                 cam_distance -= scroll_accum * 2.0f;
-                cam_distance = glm::clamp(cam_distance, 5.0f, 200.0f);
+                cam_distance = glm::clamp(cam_distance, 5.0f, 12000.0f);
             }
             // Drag → rotar
             double mx, my;
@@ -776,7 +876,6 @@ int main() {
         // ── Simulacion ─────────────────────────────────────────────
         float sim_dt = paused ? 0.0f : dt * time_warp;
         orbit.update(sim_dt);
-        glm::vec3 satPos = orbit.posScaled(orbit.time, EARTH_R);
         if (real_utc_mode && !paused && std::abs(time_warp - 1.0f) < 0.001f) {
             // Keep UTC progression monotonic: never jump backwards after high warp.
             const double realtime_now = (double)std::time(nullptr);
@@ -785,15 +884,23 @@ int main() {
             sim_unix += sim_dt;
         }
         earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
+        glm::vec3 moonPos = moonPositionWorldFromUnix(sim_unix, EARTH_R);
+
+        const bool satAroundMoon = normalizeOrbitalCenter(satScenario.orbital_center) == "moon";
+        const float satCenterRenderR = renderRadiusForCenter(satScenario.orbital_center);
+        glm::vec3 satRelPos = orbit.posScaled(orbit.time, satCenterRenderR);
+        glm::vec3 satCenterOffset = satAroundMoon ? moonPos : glm::vec3(0.0f);
+        glm::vec3 satPos = satCenterOffset + satRelPos;
 
         if (selectedSatIdx < 0 || selectedSatIdx >= (int)satellites.size()) selectedSatIdx = 0;
         if (selectedAntennaIdx < 0 || selectedAntennaIdx >= (int)antennas.size()) selectedAntennaIdx = 0;
         if (selectedSatIdx != lastSatIdx) {
             satScenario = satellites[selectedSatIdx];
             orbit.el = satScenario.elements;
+            orbit.setCentralBody(orbitalCenterMu(satScenario.orbital_center), orbitalCenterRadius(satScenario.orbital_center));
             orbit.setMeanMotionOverride((satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) ? satScenario.tle_mean_motion_rad_s : 0.0);
             orbit.time = orbitStartFromUnix(satScenario, sim_unix);
-            ui_alt_km   = (float)((satScenario.elements.a - phys::R_EARTH) / 1000.0);
+            ui_alt_km   = (float)((satScenario.elements.a - orbitalCenterRadius(satScenario.orbital_center)) / 1000.0);
             ui_ecc      = (float)satScenario.elements.e;
             ui_inc_deg  = (float)glm::degrees(satScenario.elements.i);
             ui_raan_deg = (float)glm::degrees(satScenario.elements.raan);
@@ -810,27 +917,29 @@ int main() {
             histCount = 0;
             selectedAntennaIdx = 0;
             trailCount = 0;
+            trailHead = 0;
             deleteLineMesh(orbitPath);
-            orbitPath = createOrbitPath(orbit, EARTH_R);
+            orbitPath = createOrbitPath(orbit, renderRadiusForCenter(satScenario.orbital_center));
             lastSatIdx = selectedSatIdx;
         }
 
         // Trail
         trailTimer += sim_dt;
-        if (trailTimer > 5.0f && !paused && trailCount < TRAIL_MAX) {
+        if (trailTimer > 5.0f && !paused) {
             trailTimer = 0.0f;
-            trailVerts[trailCount*3+0] = satPos.x;
-            trailVerts[trailCount*3+1] = satPos.y;
-            trailVerts[trailCount*3+2] = satPos.z;
-            trailCount++;
-            glBindBuffer(GL_ARRAY_BUFFER, trailVBO);
-            glBufferSubData(GL_ARRAY_BUFFER, 0, trailCount*3*sizeof(float), trailVerts.data());
+            trailVerts[trailHead*3+0] = satPos.x;
+            trailVerts[trailHead*3+1] = satPos.y;
+            trailVerts[trailHead*3+2] = satPos.z;
+            trailHead = (trailHead + 1) % TRAIL_MAX;
+            trailCount = std::min(TRAIL_MAX, trailCount + 1);
         }
 
         // Datos orbitales actuales
+        const double centerMu = orbitalCenterMu(satScenario.orbital_center);
+        const double centerRadius = orbitalCenterRadius(satScenario.orbital_center);
         double posLen = glm::length(orbit.positionAt(orbit.time));
-        double alt_km = (posLen - phys::R_EARTH) / 1000.0;
-        double vel_kms = std::sqrt(phys::MU * (2.0/posLen - 1.0/orbit.el.a)) / 1000.0;
+        double alt_km = (posLen - centerRadius) / 1000.0;
+        double vel_kms = std::sqrt(centerMu * (2.0/posLen - 1.0/orbit.el.a)) / 1000.0;
         double period_min = orbit.period() / 60.0;
 
         int activeLinks = 0;
@@ -859,6 +968,8 @@ int main() {
             float azDeg = glm::degrees(std::atan2(glm::dot(ur, east), glm::dot(ur, north)));
             if (azDeg < 0.0f) azDeg += 360.0f;
 
+            bool blockedByMoon = segmentIntersectsSphere(stationPos, satPos, moonPos, MOON_R * 1.001f);
+
             float maxAzStep = ant.slew_az_deg_s * dt;
             float maxElStep = ant.slew_el_deg_s * dt;
             float daz = wrap180(azDeg - ant.current_az_deg);
@@ -867,7 +978,7 @@ int main() {
             ant.current_el_deg += glm::clamp(del, -maxElStep, maxElStep);
             ant.current_el_deg = glm::clamp(ant.current_el_deg, -5.0f, 90.0f);
 
-            bool visible = elevationDeg >= std::max(elevation_mask_deg, ant.min_elevation_deg);
+            bool visible = (elevationDeg >= std::max(elevation_mask_deg, ant.min_elevation_deg)) && !blockedByMoon;
             bool locked = visible
                        && (std::abs(wrap180(azDeg - ant.current_az_deg)) < 0.7f)
                        && (std::abs(elevationDeg - ant.current_el_deg) < 0.7f);
@@ -1039,14 +1150,33 @@ int main() {
         if (ImGui::BeginTabBar("mission_tabs")) {
             if (ImGui::BeginTabItem("Ops")) {
                 ImGui::SeparatorText("Time");
-                ImGui::SliderFloat("Warp", &time_warp, 1.0f, 10000.0f, "x%.0f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("Warp", &time_warp, 1.0f, 1000000.0f, "x%.0f", ImGuiSliderFlags_Logarithmic);
                 if (ImGui::Button(paused ? "Resume" : "Pause")) paused = !paused;
                 ImGui::SameLine();
                 if (ImGui::Button("Reset")) {
                     sim_unix = (double)std::time(nullptr);
                     orbit.time = orbitStartFromUnix(satScenario, sim_unix);
                     trailCount = 0;
+                    trailHead = 0;
                     earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Warp to Trackable")) {
+                    const double warpSeconds = findNextTrackableWarpSeconds();
+                    if (warpSeconds > 0.0) {
+                        sim_unix += warpSeconds;
+                        orbit.time += warpSeconds;
+                        cameraFocusMode = 2; // Satellite focus after warp.
+                        earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
+                        trailCount = 0;
+                        trailHead = 0;
+
+                        std::ostringstream e;
+                        e << "[" << utcStringFromUnix(sim_unix) << "] TIME WARP +" << (int)warpSeconds << " s (trackable)";
+                        eventLog.push_back(e.str());
+                    } else {
+                        pushWarn(cfgDiag, "warp: no trackable pass found in next 72h");
+                    }
                 }
 
                 double elapsed = orbit.time;
@@ -1071,17 +1201,29 @@ int main() {
                 ImGui::Text("Velocity: %.3f km/s", vel_kms);
                 ImGui::Text("Period: %.1f min", period_min);
                 ImGui::Text("Satellite: %s", satScenario.name.c_str());
+                ImGui::Text("Center body: %s", orbitalCenterDisplayName(satScenario.orbital_center));
                 ImGui::Text("Satellites: %d | Antennas: %d | Active links: %d", (int)satellites.size(), (int)antennas.size(), activeLinks);
 
                 ImGui::SeparatorText("Orbital Params");
-                ImGui::SliderFloat("Altitude (km)", &ui_alt_km, 200.0f, 42000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+                int centerChoice = normalizeOrbitalCenter(satScenario.orbital_center) == "moon" ? 1 : 0;
+                if (ImGui::Combo("Orbital Center", &centerChoice, "Earth\0Moon\0")) {
+                    satScenario.orbital_center = centerChoice == 1 ? "moon" : "earth";
+                    orbit.setCentralBody(orbitalCenterMu(satScenario.orbital_center), orbitalCenterRadius(satScenario.orbital_center));
+                    ui_alt_km = glm::clamp(ui_alt_km, satScenario.orbital_center == "moon" ? 10.0f : 120.0f,
+                                           satScenario.orbital_center == "moon" ? 100000.0f : 42000.0f);
+                }
+                const float minAltKmUi = satScenario.orbital_center == "moon" ? 10.0f : 120.0f;
+                const float maxAltKmUi = satScenario.orbital_center == "moon" ? 100000.0f : 42000.0f;
+                ImGui::SliderFloat("Altitude (km)", &ui_alt_km, minAltKmUi, maxAltKmUi, "%.0f", ImGuiSliderFlags_Logarithmic);
                 ImGui::SliderFloat("Eccentricity", &ui_ecc, 0.0f, 0.95f, "%.4f");
                 ImGui::SliderFloat("Inclination", &ui_inc_deg, 0.0f, 180.0f, "%.1f deg");
                 ImGui::SliderFloat("RAAN", &ui_raan_deg, -180.0f, 360.0f, "%.1f deg");
                 ImGui::SliderFloat("Arg Periapsis", &ui_omg_deg, 0.0f, 360.0f, "%.1f deg");
 
                 if (ImGui::Button("Apply Changes")) {
-                    orbit.el.a     = phys::R_EARTH + (double)ui_alt_km * 1000.0;
+                    const double bodyRadius = orbitalCenterRadius(satScenario.orbital_center);
+                    orbit.setCentralBody(orbitalCenterMu(satScenario.orbital_center), bodyRadius);
+                    orbit.el.a     = bodyRadius + (double)ui_alt_km * 1000.0;
                     orbit.el.e     = ui_ecc;
                     orbit.el.i     = glm::radians((double)ui_inc_deg);
                     orbit.el.raan  = glm::radians((double)ui_raan_deg);
@@ -1092,21 +1234,25 @@ int main() {
                     satellites[selectedSatIdx] = satScenario;
                     orbit.time = orbitStartFromUnix(satScenario, sim_unix);
                     trailCount = 0;
+                    trailHead = 0;
                     deleteLineMesh(orbitPath);
-                    orbitPath = createOrbitPath(orbit, EARTH_R);
+                    orbitPath = createOrbitPath(orbit, renderRadiusForCenter(satScenario.orbital_center));
                 }
 
                 ImGui::SeparatorText("Presets");
                 for (int i = 0; i < NUM_PRESETS; ++i) {
                     if (i > 0 && i % 3 != 0) ImGui::SameLine();
                     if (ImGui::Button(PRESETS[i].name)) {
+                        satScenario.orbital_center = normalizeOrbitalCenter(PRESETS[i].orbital_center);
                         ui_alt_km   = PRESETS[i].alt_km;
                         ui_ecc      = PRESETS[i].ecc;
                         ui_inc_deg  = PRESETS[i].inc_deg;
                         ui_raan_deg = PRESETS[i].raan_deg;
                         ui_omg_deg  = PRESETS[i].omega_deg;
 
-                        orbit.el.a     = phys::R_EARTH + (double)ui_alt_km * 1000.0;
+                        const double bodyRadius = orbitalCenterRadius(satScenario.orbital_center);
+                        orbit.setCentralBody(orbitalCenterMu(satScenario.orbital_center), bodyRadius);
+                        orbit.el.a     = bodyRadius + (double)ui_alt_km * 1000.0;
                         orbit.el.e     = ui_ecc;
                         orbit.el.i     = glm::radians((double)ui_inc_deg);
                         orbit.el.raan  = glm::radians((double)ui_raan_deg);
@@ -1117,8 +1263,9 @@ int main() {
                         satellites[selectedSatIdx] = satScenario;
                         orbit.time = orbitStartFromUnix(satScenario, sim_unix);
                         trailCount = 0;
+                        trailHead = 0;
                         deleteLineMesh(orbitPath);
-                        orbitPath = createOrbitPath(orbit, EARTH_R);
+                        orbitPath = createOrbitPath(orbit, renderRadiusForCenter(satScenario.orbital_center));
                     }
                 }
 
@@ -1144,8 +1291,9 @@ int main() {
                     glBufferData(GL_ARRAY_BUFFER, linkVerts.size() * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
 
                     orbit.el = satScenario.elements;
+                    orbit.setCentralBody(orbitalCenterMu(satScenario.orbital_center), orbitalCenterRadius(satScenario.orbital_center));
                     orbit.setMeanMotionOverride((satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) ? satScenario.tle_mean_motion_rad_s : 0.0);
-                    ui_alt_km   = (float)((satScenario.elements.a - phys::R_EARTH) / 1000.0);
+                    ui_alt_km   = (float)((satScenario.elements.a - orbitalCenterRadius(satScenario.orbital_center)) / 1000.0);
                     ui_ecc      = (float)satScenario.elements.e;
                     ui_inc_deg  = (float)glm::degrees(satScenario.elements.i);
                     ui_raan_deg = (float)glm::degrees(satScenario.elements.raan);
@@ -1155,8 +1303,9 @@ int main() {
                     earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
                     lastSatIdx = selectedSatIdx;
                     trailCount = 0;
+                    trailHead = 0;
                     deleteLineMesh(orbitPath);
-                    orbitPath = createOrbitPath(orbit, EARTH_R);
+                    orbitPath = createOrbitPath(orbit, renderRadiusForCenter(satScenario.orbital_center));
                 }
                 ImGui::EndTabItem();
             }
@@ -1273,9 +1422,15 @@ int main() {
                 ImGui::SameLine(); ImGui::Checkbox("Axes", &show_axes);
                 ImGui::Checkbox("Stars", &show_stars);
                 ImGui::SameLine(); ImGui::Checkbox("Trail", &show_trail);
+                ImGui::Checkbox("Moon orbit", &show_moon_orbit);
                 ImGui::Checkbox("Earth texture", &use_texture);
                 ImGui::Checkbox("Antennas", &show_antennas);
                 ImGui::SameLine(); ImGui::Checkbox("Links", &show_links);
+                ImGui::SliderFloat("Satellite Size", &sat_size_multiplier, 0.5f, 3.0f, "%.2fx");
+
+                ImGui::SeparatorText("Camera");
+                ImGui::SliderFloat("Distance", &cam_distance, 5.0f, 12000.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+                ImGui::Combo("Focus", &cameraFocusMode, "Earth\0Moon\0Satellite\0");
                 ImGui::EndTabItem();
             }
 
@@ -1364,7 +1519,7 @@ int main() {
 
                     for (int i = 0; i < (int)realSatCatalog.size(); ++i) {
                         const RealSatelliteEntry& rs = realSatCatalog[i];
-                        float altKm = (float)((rs.satellite.elements.a - phys::R_EARTH) / 1000.0);
+                        float altKm = (float)((rs.satellite.elements.a - orbitalCenterRadius(rs.satellite.orbital_center)) / 1000.0);
                         float ageHours = (float)std::max(0.0, ((double)std::time(nullptr) - rs.satellite.tle_epoch_unix) / 3600.0);
 
                         ImGui::TableNextRow();
@@ -1444,12 +1599,19 @@ int main() {
         // ═══════════════════════════════════════════════════════════
 
         float cy = glm::radians(cam_yaw), cp = glm::radians(cam_pitch);
-        glm::vec3 camPos(cam_distance*std::cos(cp)*std::cos(cy),
-                         cam_distance*std::sin(cp),
-                         cam_distance*std::cos(cp)*std::sin(cy));
-        glm::mat4 view = glm::lookAt(camPos, glm::vec3(0), glm::vec3(0,1,0));
+        glm::vec3 focusPos(0.0f);
+        if (cameraFocusMode == 1) {
+            focusPos = moonPos;
+        } else if (cameraFocusMode == 2) {
+            focusPos = satPos;
+        }
+        glm::vec3 camOffset(cam_distance*std::cos(cp)*std::cos(cy),
+                            cam_distance*std::sin(cp),
+                            cam_distance*std::cos(cp)*std::sin(cy));
+        glm::vec3 camPos = focusPos + camOffset;
+        glm::mat4 view = glm::lookAt(camPos, focusPos, glm::vec3(0,1,0));
         glm::mat4 proj = glm::perspective(glm::radians(45.0f),
-            (float)WIN_W/(float)WIN_H, 0.1f, 500.0f);
+            (float)WIN_W/(float)WIN_H, 0.1f, 5000.0f);
 
         glClearColor(0.02f, 0.02f, 0.05f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1457,14 +1619,29 @@ int main() {
         glm::vec3 lightDir = sunDirectionFromUnix(sim_unix);
         glm::mat4 mvp = proj * view;
 
-        // --- Estrellas ---
-        if (show_stars) {
-            glUseProgram(progLine);
-            glUniformMatrix4fv(glGetUniformLocation(progLine,"uMVP"),1,GL_FALSE,glm::value_ptr(mvp));
-            glUniform3f(glGetUniformLocation(progLine,"uColor"),0.8f,0.8f,0.9f);
-            glBindVertexArray(starVAO);
-            glPointSize(1.5f);
-            glDrawArrays(GL_POINTS, 0, 3000);
+        // --- Fondo Milky Way ---
+        if (show_stars && skyTex) {
+            glUseProgram(progSphere);
+            glm::mat4 skyModel = glm::translate(glm::mat4(1.0f), camPos);
+            glUniformMatrix4fv(glGetUniformLocation(progSphere,"uModel"),1,GL_FALSE,glm::value_ptr(skyModel));
+            glUniformMatrix4fv(glGetUniformLocation(progSphere,"uView"),1,GL_FALSE,glm::value_ptr(view));
+            glUniformMatrix4fv(glGetUniformLocation(progSphere,"uProjection"),1,GL_FALSE,glm::value_ptr(proj));
+            glUniform3fv(glGetUniformLocation(progSphere,"uLightDir"),1,glm::value_ptr(lightDir));
+            glUniform3fv(glGetUniformLocation(progSphere,"uViewPos"),1,glm::value_ptr(camPos));
+            glUniform1f(glGetUniformLocation(progSphere,"uAmbient"),1.0f);
+            glUniform3f(glGetUniformLocation(progSphere,"uColor"),1.0f,1.0f,1.0f);
+            glUniform1i(glGetUniformLocation(progSphere,"uUnlit"), 1);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, skyTex);
+            glUniform1i(glGetUniformLocation(progSphere,"uTexture"), 0);
+            glUniform1i(glGetUniformLocation(progSphere,"uUseTexture"), 1);
+
+            glDepthMask(GL_FALSE);
+            glBindVertexArray(skyMesh.vao);
+            glDrawElements(GL_TRIANGLES, skyMesh.indexCount, GL_UNSIGNED_INT, 0);
+            glDepthMask(GL_TRUE);
+
+            glUniform1i(glGetUniformLocation(progSphere,"uUnlit"), 0);
         }
 
         // --- Ejes ---
@@ -1481,15 +1658,40 @@ int main() {
         // --- Orbita ---
         if (show_orbit) {
             glUseProgram(progLine);
-            glUniformMatrix4fv(glGetUniformLocation(progLine,"uMVP"),1,GL_FALSE,glm::value_ptr(mvp));
+            glm::mat4 orbitModel = normalizeOrbitalCenter(satScenario.orbital_center) == "moon"
+                                 ? glm::translate(glm::mat4(1.0f), moonPos)
+                                 : glm::mat4(1.0f);
+            glm::mat4 orbitMvp = proj * view * orbitModel;
+            glUniformMatrix4fv(glGetUniformLocation(progLine,"uMVP"),1,GL_FALSE,glm::value_ptr(orbitMvp));
             glLineWidth(1.0f);
             glBindVertexArray(orbitPath.vao);
             glUniform3f(glGetUniformLocation(progLine,"uColor"),0.3f,0.6f,0.9f);
             glDrawArrays(GL_LINE_STRIP, 0, orbitPath.vertexCount);
         }
 
+        // --- Orbita lunar alrededor de la Tierra ---
+        if (show_moon_orbit) {
+            glUseProgram(progLine);
+            glUniformMatrix4fv(glGetUniformLocation(progLine,"uMVP"),1,GL_FALSE,glm::value_ptr(mvp));
+            glLineWidth(1.0f);
+            glBindVertexArray(moonOrbitPath.vao);
+            glUniform3f(glGetUniformLocation(progLine,"uColor"),0.72f,0.72f,0.78f);
+            glDrawArrays(GL_LINE_STRIP, 0, moonOrbitPath.vertexCount);
+        }
+
         // --- Trail ---
         if (show_trail && trailCount > 1) {
+            std::vector<float> orderedTrail(trailCount * 3);
+            int oldest = (trailCount == TRAIL_MAX) ? trailHead : 0;
+            for (int i = 0; i < trailCount; ++i) {
+                int src = (oldest + i) % TRAIL_MAX;
+                orderedTrail[i*3+0] = trailVerts[src*3+0];
+                orderedTrail[i*3+1] = trailVerts[src*3+1];
+                orderedTrail[i*3+2] = trailVerts[src*3+2];
+            }
+            glBindBuffer(GL_ARRAY_BUFFER, trailVBO);
+            glBufferSubData(GL_ARRAY_BUFFER, 0, trailCount * 3 * sizeof(float), orderedTrail.data());
+
             glUseProgram(progLine);
             glUniformMatrix4fv(glGetUniformLocation(progLine,"uMVP"),1,GL_FALSE,glm::value_ptr(mvp));
             glBindVertexArray(trailVAO);
@@ -1507,6 +1709,7 @@ int main() {
         glUniform3fv(glGetUniformLocation(progSphere,"uViewPos"),1,glm::value_ptr(camPos));
         glUniform3f(glGetUniformLocation(progSphere,"uColor"),0.15f,0.45f,0.75f);
         glUniform1f(glGetUniformLocation(progSphere,"uAmbient"),0.15f);
+        glUniform1i(glGetUniformLocation(progSphere,"uUnlit"), 0);
 
         if (use_texture && earthTex) {
             glActiveTexture(GL_TEXTURE0);
@@ -1519,6 +1722,23 @@ int main() {
 
         glBindVertexArray(earthMesh.vao);
         glDrawElements(GL_TRIANGLES, earthMesh.indexCount, GL_UNSIGNED_INT, 0);
+
+        // --- Luna ---
+        glm::mat4 moonModel = glm::translate(glm::mat4(1.0f), moonPos)
+                            * glm::rotate(glm::mat4(1.0f), (float)(2.0 * glm::pi<double>() * (sim_unix / LUNAR_SIDEREAL_PERIOD_SECONDS)), glm::vec3(0, 1, 0));
+        glUniformMatrix4fv(glGetUniformLocation(progSphere,"uModel"),1,GL_FALSE,glm::value_ptr(moonModel));
+        glUniform3f(glGetUniformLocation(progSphere,"uColor"),0.62f,0.62f,0.64f);
+        glUniform1f(glGetUniformLocation(progSphere,"uAmbient"),0.22f);
+        if (moonTex) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, moonTex);
+            glUniform1i(glGetUniformLocation(progSphere,"uTexture"), 0);
+            glUniform1i(glGetUniformLocation(progSphere,"uUseTexture"), 1);
+        } else {
+            glUniform1i(glGetUniformLocation(progSphere,"uUseTexture"), 0);
+        }
+        glBindVertexArray(moonMesh.vao);
+        glDrawElements(GL_TRIANGLES, moonMesh.indexCount, GL_UNSIGNED_INT, 0);
 
         // --- Antenas ---
         if (show_antennas) {
@@ -1537,9 +1757,31 @@ int main() {
         }
 
         // --- Satellite ---
+        glm::vec3 satCenterPos = satAroundMoon ? moonPos : glm::vec3(0.0f);
+        float satCenterRadius = satAroundMoon ? MOON_R : EARTH_R;
+        glm::vec3 satRelToCenter = satPos - satCenterPos;
+        float satRadialDist = glm::length(satRelToCenter);
+
         float satToCamDist = glm::length(camPos - satPos);
-        float satVisualScale = glm::clamp(0.018f * satToCamDist, 1.2f, 14.0f);
-        glm::mat4 satModel = glm::translate(glm::mat4(1.0f), satPos)
+        float satVisualScale = glm::clamp(0.006f * satToCamDist * sat_size_multiplier, 0.05f, 6.0f);
+
+        // Prevent visual intersection with central body by constraining satellite size to surface clearance.
+        const float baseHalfDiagonal = 0.15f * 1.7320508f; // cube half side * sqrt(3)
+        float clearance = satRadialDist - satCenterRadius;
+        float maxScaleFromClearance = (clearance > 0.0f)
+            ? (0.8f * clearance / baseHalfDiagonal)
+            : 0.05f;
+        satVisualScale = std::min(satVisualScale, std::max(0.05f, maxScaleFromClearance));
+        float satVisualRadius = baseHalfDiagonal * satVisualScale;
+
+        glm::vec3 satDrawPos = satPos;
+        float minRadial = satCenterRadius + satVisualRadius + 0.002f;
+        if (satRadialDist < minRadial) {
+            glm::vec3 dir = (satRadialDist > 1e-6f) ? glm::normalize(satRelToCenter) : glm::vec3(0.0f, 1.0f, 0.0f);
+            satDrawPos = satCenterPos + dir * minRadial;
+        }
+
+        glm::mat4 satModel = glm::translate(glm::mat4(1.0f), satDrawPos)
                    * glm::scale(glm::mat4(1.0f), glm::vec3(satVisualScale));
         glUniformMatrix4fv(glGetUniformLocation(progSphere,"uModel"),1,GL_FALSE,glm::value_ptr(satModel));
         glUniform3f(glGetUniformLocation(progSphere,"uColor"),0.9f,0.85f,0.2f);
@@ -1583,12 +1825,15 @@ int main() {
     ImGui::DestroyContext();
 
     glDeleteVertexArrays(1,&earthMesh.vao); glDeleteBuffers(1,&earthMesh.vbo); glDeleteBuffers(1,&earthMesh.ebo);
+    glDeleteVertexArrays(1,&moonMesh.vao); glDeleteBuffers(1,&moonMesh.vbo); glDeleteBuffers(1,&moonMesh.ebo);
+    glDeleteVertexArrays(1,&skyMesh.vao); glDeleteBuffers(1,&skyMesh.vbo); glDeleteBuffers(1,&skyMesh.ebo);
     glDeleteVertexArrays(1,&satMesh.vao);   glDeleteBuffers(1,&satMesh.vbo);
-    deleteLineMesh(orbitPath); deleteLineMesh(axes);
-    glDeleteVertexArrays(1,&starVAO);  glDeleteBuffers(1,&starVBO);
+    deleteLineMesh(orbitPath); deleteLineMesh(moonOrbitPath); deleteLineMesh(axes);
     glDeleteVertexArrays(1,&trailVAO); glDeleteBuffers(1,&trailVBO);
     glDeleteVertexArrays(1,&linkVAO); glDeleteBuffers(1,&linkVBO);
     if (earthTex) glDeleteTextures(1, &earthTex);
+    if (moonTex) glDeleteTextures(1, &moonTex);
+    if (skyTex) glDeleteTextures(1, &skyTex);
     glDeleteProgram(progSphere); glDeleteProgram(progLine);
 
     glfwDestroyWindow(window);

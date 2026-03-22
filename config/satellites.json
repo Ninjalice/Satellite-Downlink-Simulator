@@ -2,6 +2,7 @@
   "satellites": [
     {
       "name": "ISS",
+      "orbital_center": "earth",
       "propagator": "sgp4_tle",
       "tle": {
         "line1": "1 25544U 98067A   26081.52083333  .00006444  00000+0  12000-3 0  9991",
@@ -25,6 +26,7 @@
     },
     {
       "name": "Demo-GEO",
+      "orbital_center": "earth",
       "propagator": "kepler",
       "orbit": {
         "altitude_km": 35786.0,
@@ -39,6 +41,46 @@
         "tx_gain_dbi": 14.0,
         "downlink_freq_hz": 2200000000.0,
         "bandwidth_hz": 3000000.0,
+        "required_ebn0_db": 4.0
+      }
+    },
+    {
+      "name": "Lunar-LLO-100km",
+      "orbital_center": "moon",
+      "propagator": "kepler",
+      "orbit": {
+        "altitude_km": 100.0,
+        "eccentricity": 0.01,
+        "inclination_deg": 90.0,
+        "raan_deg": 0.0,
+        "arg_periapsis_deg": 0.0,
+        "mean_anomaly_deg": 0.0
+      },
+      "radio": {
+        "tx_power_dbw": 24.0,
+        "tx_gain_dbi": 20.0,
+        "downlink_freq_hz": 8400000000.0,
+        "bandwidth_hz": 4000000.0,
+        "required_ebn0_db": 4.0
+      }
+    },
+    {
+      "name": "Lunar-NRHO-Demo",
+      "orbital_center": "moon",
+      "propagator": "kepler",
+      "orbit": {
+        "altitude_km": 3000.0,
+        "eccentricity": 0.6,
+        "inclination_deg": 90.0,
+        "raan_deg": 25.0,
+        "arg_periapsis_deg": 270.0,
+        "mean_anomaly_deg": 0.0
+      },
+      "radio": {
+        "tx_power_dbw": 28.0,
+        "tx_gain_dbi": 24.0,
+        "downlink_freq_hz": 8400000000.0,
+        "bandwidth_hz": 8000000.0,
         "required_ebn0_db": 4.0
       }
     }

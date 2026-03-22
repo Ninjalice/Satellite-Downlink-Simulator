@@ -19,10 +19,12 @@ class Orbit {
 public:
     OrbitalElements el;
     double time = 0.0;
+    double centralMu = phys::MU;
+    double centralRadius = phys::R_EARTH;
     bool hasCustomMeanMotion = false;
     double customMeanMotionRadS = 0.0;
 
-    explicit Orbit(const OrbitalElements& e);
+    Orbit(const OrbitalElements& e, double mu = phys::MU, double radius = phys::R_EARTH);
 
     double meanMotion() const;
     double period() const;
@@ -31,5 +33,6 @@ public:
     glm::dvec3 positionAt(double t) const;
     glm::vec3 posScaled(double t, float er) const;
     void setMeanMotionOverride(double nRadS);
+    void setCentralBody(double mu, double radius);
     void update(double dt);
 };

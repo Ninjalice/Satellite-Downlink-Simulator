@@ -1,6 +1,7 @@
 #include "scenario.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -23,12 +24,14 @@
 using json = nlohmann::json;
 
 const OrbitPreset PRESETS[] = {
-    { "ISS (LEO)",          408.0f,    0.0007f, 51.6f,  30.0f,  0.0f },
-    { "GEO",                35786.0f,  0.0f,    0.0f,   0.0f,   0.0f },
-    { "Molniya",            20229.0f,  0.74f,   63.4f,  -70.0f, 270.0f },
-    { "Sun-sync (SSO)",     600.0f,    0.001f,  97.8f,  45.0f,  0.0f },
-    { "GPS (MEO)",          20200.0f,  0.0f,    55.0f,  0.0f,   0.0f },
-    { "Hubble",             547.0f,    0.0003f, 28.5f,  0.0f,   0.0f },
+    { "ISS (LEO)",          "earth", 408.0f,    0.0007f, 51.6f,  30.0f,  0.0f },
+    { "GEO",                "earth", 35786.0f,  0.0f,    0.0f,   0.0f,   0.0f },
+    { "Molniya",            "earth", 20229.0f,  0.74f,   63.4f,  -70.0f, 270.0f },
+    { "Sun-sync (SSO)",     "earth", 600.0f,    0.001f,  97.8f,  45.0f,  0.0f },
+    { "GPS (MEO)",          "earth", 20200.0f,  0.0f,    55.0f,  0.0f,   0.0f },
+    { "Hubble",             "earth", 547.0f,    0.0003f, 28.5f,  0.0f,   0.0f },
+    { "LLO (100 km)",       "moon",  100.0f,    0.01f,   90.0f,  0.0f,   0.0f },
+    { "NRHO demo",          "moon",  3000.0f,   0.60f,   90.0f,  0.0f,   270.0f },
 };
 
 const int NUM_PRESETS = sizeof(PRESETS) / sizeof(PRESETS[0]);
@@ -37,6 +40,25 @@ static float wrap180(float deg) {
     while (deg > 180.0f) deg -= 360.0f;
     while (deg < -180.0f) deg += 360.0f;
     return deg;
+}
+
+std::string normalizeOrbitalCenter(const std::string& center) {
+    std::string out = center;
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    if (out == "moon") return "moon";
+    return "earth";
+}
+
+double orbitalCenterMu(const std::string& center) {
+    return normalizeOrbitalCenter(center) == "moon" ? phys::MU_MOON : phys::MU;
+}
+
+double orbitalCenterRadius(const std::string& center) {
+    return normalizeOrbitalCenter(center) == "moon" ? phys::R_MOON : phys::R_EARTH;
+}
+
+const char* orbitalCenterDisplayName(const std::string& center) {
+    return normalizeOrbitalCenter(center) == "moon" ? "Moon" : "Earth";
 }
 
 static float getOrDefaultFloat(const json& obj, const char* key, float fallback) {
@@ -154,6 +176,7 @@ void pushErr(ConfigDiagnostics& d, const std::string& msg) { d.errors.push_back(
 static SatelliteScenario defaultSatellite() {
     SatelliteScenario sat;
     sat.name = "ISS";
+    sat.orbital_center = "earth";
     sat.propagator = "kepler";
     sat.elements = {
         phys::R_EARTH + 408000.0,
@@ -205,14 +228,24 @@ static SatelliteScenario parseSatelliteFromJson(const json& j, ConfigDiagnostics
             sat.propagator = j.value("propagator", std::string("kepler"));
         }
 
+        if (j.contains("orbital_center") && !j["orbital_center"].is_string()) {
+            pushErr(diag, satPrefix + ":orbital_center must be a string");
+        } else {
+            sat.orbital_center = normalizeOrbitalCenter(j.value("orbital_center", std::string("earth")));
+        }
+
+        const double centerRadius = orbitalCenterRadius(sat.orbital_center);
+
         if (j.contains("orbit") && j["orbit"].is_object()) {
             const json& o = j["orbit"];
             float altKm = getOrDefaultFloat(o, "altitude_km", 408.0f);
-            if (altKm < 120.0f || altKm > 50000.0f) {
-                pushWarn(diag, satPrefix + ":orbit.altitude_km is out of range [120,50000], clamped");
-                altKm = glm::clamp(altKm, 120.0f, 50000.0f);
+            const float minAltKm = sat.orbital_center == "moon" ? 10.0f : 120.0f;
+            const float maxAltKm = sat.orbital_center == "moon" ? 100000.0f : 50000.0f;
+            if (altKm < minAltKm || altKm > maxAltKm) {
+                pushWarn(diag, satPrefix + ":orbit.altitude_km is out of range, clamped");
+                altKm = glm::clamp(altKm, minAltKm, maxAltKm);
             }
-            sat.elements.a = phys::R_EARTH + (double)altKm * 1000.0;
+            sat.elements.a = centerRadius + (double)altKm * 1000.0;
             sat.elements.e = getOrDefaultFloat(o, "eccentricity", 0.0007f);
             if (sat.elements.e < 0.0 || sat.elements.e >= 1.0) {
                 pushErr(diag, satPrefix + ":orbit.eccentricity must be in [0,1)");
@@ -239,6 +272,10 @@ static SatelliteScenario parseSatelliteFromJson(const json& j, ConfigDiagnostics
         }
 
         if (sat.propagator == "sgp4_tle") {
+            if (sat.orbital_center != "earth") {
+                pushWarn(diag, satPrefix + ":sgp4_tle is Earth-centered, forcing orbital_center=earth");
+                sat.orbital_center = "earth";
+            }
             if (!(j.contains("tle") && j["tle"].is_object())) {
                 pushErr(diag, satPrefix + ":propagator=sgp4_tle requires tle object");
             } else {

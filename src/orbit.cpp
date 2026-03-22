@@ -1,6 +1,7 @@
 #include "orbit.h"
 
 #define _USE_MATH_DEFINES
+#include <algorithm>
 #include <cmath>
 #include <ctime>
 #include <iomanip>
@@ -66,11 +67,12 @@ float throughputTableMbps(float ebn0Db) {
     return 10.0f;
 }
 
-Orbit::Orbit(const OrbitalElements& e) : el(e) {}
+Orbit::Orbit(const OrbitalElements& e, double mu, double radius)
+    : el(e), centralMu(mu), centralRadius(radius) {}
 
 double Orbit::meanMotion() const {
     if (hasCustomMeanMotion && customMeanMotionRadS > 0.0) return customMeanMotionRadS;
-    return std::sqrt(phys::MU / (el.a * el.a * el.a));
+    return std::sqrt(centralMu / (el.a * el.a * el.a));
 }
 
 double Orbit::period() const {
@@ -94,6 +96,7 @@ double Orbit::trueAnomaly(double E) const {
 
 glm::dvec3 Orbit::positionAt(double t) const {
     double n = meanMotion();
+    // In this renderer axis convention, this sign keeps orbital motion eastward.
     double M = el.M0 - n * t;
     M = std::fmod(M, 2.0 * glm::pi<double>());
     double E = solveKepler(M);
@@ -112,7 +115,7 @@ glm::dvec3 Orbit::positionAt(double t) const {
 }
 
 glm::vec3 Orbit::posScaled(double t, float er) const {
-    return glm::vec3(positionAt(t) * ((double)er / phys::R_EARTH));
+    return glm::vec3(positionAt(t) * ((double)er / centralRadius));
 }
 
 void Orbit::setMeanMotionOverride(double nRadS) {
@@ -123,6 +126,11 @@ void Orbit::setMeanMotionOverride(double nRadS) {
         hasCustomMeanMotion = false;
         customMeanMotionRadS = 0.0;
     }
+}
+
+void Orbit::setCentralBody(double mu, double radius) {
+    centralMu = std::max(1.0, mu);
+    centralRadius = std::max(1.0, radius);
 }
 
 void Orbit::update(double dt) {

@@ -11,6 +11,9 @@ constexpr double G = 6.67430e-11;
 constexpr double M_EARTH = 5.972e24;
 constexpr double R_EARTH = 6.371e6;
 constexpr double MU = G * M_EARTH;
+constexpr double M_MOON = 7.342e22;
+constexpr double R_MOON = 1.7374e6;
+constexpr double MU_MOON = G * M_MOON;
 constexpr double C_LIGHT = 299792458.0;
 }
 
@@ -51,6 +54,7 @@ struct OrbitalElements {
 
 struct SatelliteScenario {
     std::string name = "ISS";
+    std::string orbital_center = "earth";
     std::string propagator = "kepler";
     OrbitalElements elements{};
     std::string tle_line1;
@@ -113,6 +117,7 @@ struct LinkPick {
 
 struct OrbitPreset {
     const char* name;
+    const char* orbital_center;
     float alt_km;
     float ecc;
     float inc_deg;
@@ -122,6 +127,11 @@ struct OrbitPreset {
 
 extern const OrbitPreset PRESETS[];
 extern const int NUM_PRESETS;
+
+std::string normalizeOrbitalCenter(const std::string& center);
+double orbitalCenterMu(const std::string& center);
+double orbitalCenterRadius(const std::string& center);
+const char* orbitalCenterDisplayName(const std::string& center);
 
 void pushWarn(ConfigDiagnostics& d, const std::string& msg);
 void pushErr(ConfigDiagnostics& d, const std::string& msg);
