@@ -47,8 +47,16 @@ static float time_warp = 100.0f;
 
 static constexpr double SIDEREAL_DAY_SECONDS = 86164.0905;
 static constexpr double LUNAR_SIDEREAL_PERIOD_SECONDS = 27.321661 * 86400.0;
-static constexpr double EARTH_MOON_MEAN_DISTANCE_M = 384400000.0;
-static constexpr double MOON_ORBIT_INCLINATION_RAD = 0.08979719; // 5.145 deg
+
+struct MoonEphemeris {
+    glm::dvec3 eciMeters = glm::dvec3(0.0);
+    double meanAnomalyRad = 0.0;
+    double ascendingNodeRad = 0.0;
+    double argPerigeeRad = 0.0;
+    double inclinationRad = 0.0;
+    double eccentricity = 0.0;
+    double semiMajorAxisMeters = 0.0;
+};
 
 static double julianDateFromUnix(double unixSeconds) {
     return unixSeconds / 86400.0 + 2440587.5;
@@ -89,16 +97,73 @@ static glm::vec3 sunDirectionFromUnix(double unixSeconds) {
     return glm::normalize(glm::vec3((float)xEci, (float)zEci, (float)yEci));
 }
 
+static double wrapDegrees(double deg) {
+    double w = std::fmod(deg, 360.0);
+    if (w < 0.0) w += 360.0;
+    return w;
+}
+
+static MoonEphemeris moonEphemerisFromUnix(double unixSeconds) {
+    // Low-precision lunar elements (J2000), good enough for visual simulation.
+    // Source style: classic Keplerian approximation used for quick ephemerides.
+    const double jd = julianDateFromUnix(unixSeconds);
+    const double d = jd - 2451543.5;
+
+    const double nDeg = wrapDegrees(125.1228 - 0.0529538083 * d);   // ascending node
+    const double iDeg = 5.1454;
+    const double wDeg = wrapDegrees(318.0634 + 0.1643573223 * d);    // arg perigee
+    const double aEarthRadii = 60.2666;
+    const double e = 0.054900;
+    const double mDeg = wrapDegrees(115.3654 + 13.0649929509 * d);   // mean anomaly
+
+    const double N = glm::radians(nDeg);
+    const double i = glm::radians(iDeg);
+    const double w = glm::radians(wDeg);
+    const double M = glm::radians(mDeg);
+
+    double E = M + e * std::sin(M) * (1.0 + e * std::cos(M));
+    for (int it = 0; it < 10; ++it) {
+        const double f = E - e * std::sin(E) - M;
+        const double fp = 1.0 - e * std::cos(E);
+        const double dE = f / fp;
+        E -= dE;
+        if (std::abs(dE) < 1e-12) break;
+    }
+
+    const double xv = aEarthRadii * (std::cos(E) - e);
+    const double yv = aEarthRadii * (std::sqrt(1.0 - e * e) * std::sin(E));
+    const double v = std::atan2(yv, xv);
+    const double rEarthRadii = std::sqrt(xv * xv + yv * yv);
+
+    // Ecliptic geocentric coordinates.
+    const double vw = v + w;
+    const double xEcl = rEarthRadii * (std::cos(N) * std::cos(vw) - std::sin(N) * std::sin(vw) * std::cos(i));
+    const double yEcl = rEarthRadii * (std::sin(N) * std::cos(vw) + std::cos(N) * std::sin(vw) * std::cos(i));
+    const double zEcl = rEarthRadii * (std::sin(vw) * std::sin(i));
+
+    // Rotate from ecliptic to equatorial frame (mean obliquity).
+    const double eps = glm::radians(23.4393 - 3.563e-7 * d);
+    const double xEq = xEcl;
+    const double yEq = yEcl * std::cos(eps) - zEcl * std::sin(eps);
+    const double zEq = yEcl * std::sin(eps) + zEcl * std::cos(eps);
+
+    MoonEphemeris moon;
+    moon.eciMeters = glm::dvec3(xEq, yEq, zEq) * phys::R_EARTH;
+    moon.meanAnomalyRad = M;
+    moon.ascendingNodeRad = N;
+    moon.argPerigeeRad = w;
+    moon.inclinationRad = i;
+    moon.eccentricity = e;
+    moon.semiMajorAxisMeters = aEarthRadii * phys::R_EARTH;
+    return moon;
+}
+
 static glm::vec3 moonPositionWorldFromUnix(double unixSeconds, float earthRenderRadius) {
     const double metersToWorld = (double)earthRenderRadius / phys::R_EARTH;
-    const double orbitRadiusWorld = EARTH_MOON_MEAN_DISTANCE_M * metersToWorld;
-    const double phase = std::fmod(unixSeconds, LUNAR_SIDEREAL_PERIOD_SECONDS) / LUNAR_SIDEREAL_PERIOD_SECONDS;
-    const double ang = phase * 2.0 * glm::pi<double>();
-
-    glm::dvec3 pos(orbitRadiusWorld * std::cos(ang), 0.0, orbitRadiusWorld * std::sin(ang));
-    glm::dmat4 tilt = glm::rotate(glm::dmat4(1.0), MOON_ORBIT_INCLINATION_RAD, glm::dvec3(1.0, 0.0, 0.0));
-    glm::dvec4 tilted = tilt * glm::dvec4(pos, 1.0);
-    return glm::vec3((float)tilted.x, (float)tilted.y, (float)tilted.z);
+    const MoonEphemeris moon = moonEphemerisFromUnix(unixSeconds);
+    const glm::dvec3 world = moon.eciMeters * metersToWorld;
+    // Renderer axis mapping: ECI (x,y,z) -> world (x,z,y).
+    return glm::vec3((float)world.x, (float)world.z, (float)world.y);
 }
 
 static bool segmentIntersectsSphere(const glm::vec3& a, const glm::vec3& b,
@@ -328,21 +393,48 @@ LineMesh createOrbitPath(const Orbit& orb, float er, int seg = 500) {
     return createLineMesh(v, seg+1);
 }
 
-LineMesh createMoonOrbitPath(float earthRenderRadius, int seg = 720) {
+LineMesh createMoonOrbitPath(double unixSeconds, float earthRenderRadius, int seg = 720) {
     std::vector<float> v;
     v.reserve((seg + 1) * 3);
 
+    const MoonEphemeris moon = moonEphemerisFromUnix(unixSeconds);
     const double metersToWorld = (double)earthRenderRadius / phys::R_EARTH;
-    const double orbitRadiusWorld = EARTH_MOON_MEAN_DISTANCE_M * metersToWorld;
-    const glm::dmat4 tilt = glm::rotate(glm::dmat4(1.0), MOON_ORBIT_INCLINATION_RAD, glm::dvec3(1.0, 0.0, 0.0));
+    const double aEarthRadii = moon.semiMajorAxisMeters / phys::R_EARTH;
+    const double jd = julianDateFromUnix(unixSeconds);
+    const double d = jd - 2451543.5;
+    const double eps = glm::radians(23.4393 - 3.563e-7 * d);
+
+    auto solveEccentricAnomaly = [&](double M, double ecc) {
+        double E = M;
+        for (int it = 0; it < 12; ++it) {
+            const double dE = (E - ecc * std::sin(E) - M) / (1.0 - ecc * std::cos(E));
+            E -= dE;
+            if (std::abs(dE) < 1e-11) break;
+        }
+        return E;
+    };
 
     for (int i = 0; i <= seg; ++i) {
-        const double ang = (2.0 * glm::pi<double>() * (double)i) / (double)seg;
-        glm::dvec3 p(orbitRadiusWorld * std::cos(ang), 0.0, orbitRadiusWorld * std::sin(ang));
-        glm::dvec4 tilted = tilt * glm::dvec4(p, 1.0);
-        v.push_back((float)tilted.x);
-        v.push_back((float)tilted.y);
-        v.push_back((float)tilted.z);
+        const double M = (2.0 * glm::pi<double>() * (double)i) / (double)seg;
+        const double E = solveEccentricAnomaly(M, moon.eccentricity);
+        const double xv = aEarthRadii * (std::cos(E) - moon.eccentricity);
+        const double yv = aEarthRadii * (std::sqrt(1.0 - moon.eccentricity * moon.eccentricity) * std::sin(E));
+        const double nu = std::atan2(yv, xv);
+        const double r = std::sqrt(xv * xv + yv * yv);
+
+        const double vw = nu + moon.argPerigeeRad;
+        const double xEcl = r * (std::cos(moon.ascendingNodeRad) * std::cos(vw) - std::sin(moon.ascendingNodeRad) * std::sin(vw) * std::cos(moon.inclinationRad));
+        const double yEcl = r * (std::sin(moon.ascendingNodeRad) * std::cos(vw) + std::cos(moon.ascendingNodeRad) * std::sin(vw) * std::cos(moon.inclinationRad));
+        const double zEcl = r * (std::sin(vw) * std::sin(moon.inclinationRad));
+
+        const double xEq = xEcl;
+        const double yEq = yEcl * std::cos(eps) - zEcl * std::sin(eps);
+        const double zEq = yEcl * std::sin(eps) + zEcl * std::cos(eps);
+
+        const glm::dvec3 world = glm::dvec3(xEq, yEq, zEq) * (phys::R_EARTH * metersToWorld);
+        v.push_back((float)world.x);
+        v.push_back((float)world.z);
+        v.push_back((float)world.y);
     }
 
     return createLineMesh(v, seg + 1);
@@ -634,7 +726,7 @@ int main() {
     orbit.setMeanMotionOverride((satScenario.propagator == "sgp4_tle" && satScenario.tle_loaded) ? satScenario.tle_mean_motion_rad_s : 0.0);
     orbit.time = orbitStartFromUnix(satScenario, sim_unix);
     LineMesh orbitPath = createOrbitPath(orbit, renderRadiusForCenter(satScenario.orbital_center));
-    LineMesh moonOrbitPath = createMoonOrbitPath(EARTH_R);
+    LineMesh moonOrbitPath = createMoonOrbitPath(sim_unix, EARTH_R);
     LineMesh axes      = createAxes(EARTH_R * 2.0f);
 
     // Parametros editables (para ImGui)
@@ -707,6 +799,7 @@ int main() {
     int lastSatIdx = selectedSatIdx;
     int selectedAntennaIdx = 0;
     std::string exportStatus;
+    double moonOrbitPathUnixRef = sim_unix;
 
     auto parseNoradFromLine1 = [](const std::string& line1) -> int {
         if (line1.size() < 7 || line1[0] != '1') return -1;
@@ -885,6 +978,11 @@ int main() {
         }
         earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
         glm::vec3 moonPos = moonPositionWorldFromUnix(sim_unix, EARTH_R);
+        if (std::abs(sim_unix - moonOrbitPathUnixRef) > 3600.0) {
+            deleteLineMesh(moonOrbitPath);
+            moonOrbitPath = createMoonOrbitPath(sim_unix, EARTH_R);
+            moonOrbitPathUnixRef = sim_unix;
+        }
 
         const bool satAroundMoon = normalizeOrbitalCenter(satScenario.orbital_center) == "moon";
         const float satCenterRenderR = renderRadiusForCenter(satScenario.orbital_center);
@@ -1159,6 +1257,9 @@ int main() {
                     trailCount = 0;
                     trailHead = 0;
                     earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
+                    deleteLineMesh(moonOrbitPath);
+                    moonOrbitPath = createMoonOrbitPath(sim_unix, EARTH_R);
+                    moonOrbitPathUnixRef = sim_unix;
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Warp to Trackable")) {
@@ -1168,6 +1269,9 @@ int main() {
                         orbit.time += warpSeconds;
                         cameraFocusMode = 2; // Satellite focus after warp.
                         earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
+                        deleteLineMesh(moonOrbitPath);
+                        moonOrbitPath = createMoonOrbitPath(sim_unix, EARTH_R);
+                        moonOrbitPathUnixRef = sim_unix;
                         trailCount = 0;
                         trailHead = 0;
 
@@ -1301,6 +1405,9 @@ int main() {
                     sim_unix = (double)std::time(nullptr);
                     orbit.time = orbitStartFromUnix(satScenario, sim_unix);
                     earth_rotation = (float)(gmstRadiansFromUnix(sim_unix));
+                    deleteLineMesh(moonOrbitPath);
+                    moonOrbitPath = createMoonOrbitPath(sim_unix, EARTH_R);
+                    moonOrbitPathUnixRef = sim_unix;
                     lastSatIdx = selectedSatIdx;
                     trailCount = 0;
                     trailHead = 0;
